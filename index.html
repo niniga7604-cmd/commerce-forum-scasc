@@ -2515,6 +2515,296 @@ async function deleteStorageFile(item){
   }catch(_){}
 }
 
+
+/* ---------- UNIFIED PHOTO PIPELINE ----------
+   Used by: Admin → Upload Media, Admin → Edit Events → Event Photo Manager, Admin → Add Event.
+   compress (Canvas → JPEG) → Firebase Storage (15 s timeout, real progress) → Realtime Database Base64 fallback
+   → hide that event's built-in photos (cf/deletedPhotos) once ≥1 new photo is really saved. */
+const PHOTO_CFG={
+  maxDim:1000,quality:0.72,           // required output limits
+  thumbDim:480,thumbQuality:0.72,     // small preview kept in cf/media for fast gallery lists
+  targetMaxBytes:180*1024,            // preferred upper size
+  retryAboveBytes:260*1024,           // only re-compress harder when clearly above the target
+  storageTimeoutMs:15000,             // per-photo Storage attempt
+  dbTimeoutMs:20000,                  // Realtime Database write guard (offline writes never reject by themselves)
+  fallbackMaxBytes:900*1024,          // largest compressed JPEG we allow into the Realtime Database
+  maxPixels:120e6                     // refuse absurd decoded sizes (browser memory protection)
+};
+const fmtBytes=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB';
+
+function decodeImageFile(file){
+  return new Promise((resolve,reject)=>{
+    let url='',timer=null,done=false;
+    const img=new Image();
+    const fin=(fn,v)=>{if(done)return;done=true;clearTimeout(timer);fn(v)};
+    try{url=URL.createObjectURL(file)}catch(_){return reject(new UserError('"'+file.name+'" could not be opened by the browser.'))}
+    img._objUrl=url;
+    timer=setTimeout(()=>{releaseImage(img);fin(reject,new UserError('"'+file.name+'" took too long to decode.'))},20000);
+    img.onload=()=>{
+      const w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;
+      if(!w||!h){releaseImage(img);return fin(reject,new UserError('"'+file.name+'" has invalid dimensions.'))}
+      if(w*h>PHOTO_CFG.maxPixels){releaseImage(img);return fin(reject,new UserError('"'+file.name+'" is too large to process in the browser ('+w+'×'+h+' px).'))}
+      fin(resolve,img);
+    };
+    img.onerror=()=>{releaseImage(img);fin(reject,new UserError('"'+file.name+'" could not be decoded (corrupted or unsupported image).'))};
+    img.src=url;
+  });
+}
+function releaseImage(img){
+  try{if(img&&img._objUrl){URL.revokeObjectURL(img._objUrl);img._objUrl=''}}catch(_){}
+  try{if(img){img.onload=img.onerror=null}}catch(_){}
+}
+function drawJpegCanvas(img,maxDim){
+  const ow=img.naturalWidth||img.width,oh=img.naturalHeight||img.height;
+  const s=Math.min(1,maxDim/Math.max(ow,oh));           // never enlarge small images
+  const w=Math.max(1,Math.round(ow*s)),h=Math.max(1,Math.round(oh*s));
+  const c=document.createElement('canvas');
+  c.width=w;c.height=h;
+  const ctx=c.getContext('2d');
+  if(!ctx)throw new UserError('Your browser could not create an image canvas (low memory?).');
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+  ctx.fillStyle='#ffffff';ctx.fillRect(0,0,w,h);          // white background for transparent PNG/WEBP
+  ctx.drawImage(img,0,0,w,h);
+  return {c,w,h};
+}
+function canvasToJpegBlob(c,quality){
+  return new Promise((resolve,reject)=>{
+    try{
+      c.toBlob(b=>b?resolve(b):reject(new UserError('The browser could not encode the image as JPEG.')),'image/jpeg',quality);
+    }catch(e){reject(new UserError('The browser could not encode the image as JPEG.'))}
+  });
+}
+async function compressPhoto(file){
+  const img=await decodeImageFile(file);
+  try{
+    const ow=img.naturalWidth||img.width,oh=img.naturalHeight||img.height;
+    // first attempt = required settings (≤1000 px, quality 0.72); only if clearly oversized, step down within the limits
+    const attempts=[[PHOTO_CFG.maxDim,PHOTO_CFG.quality],[PHOTO_CFG.maxDim,0.62],[900,0.62],[800,0.58]];
+    let best=null;
+    for(const [dim,q] of attempts){
+      const {c,w,h}=drawJpegCanvas(img,dim);
+      let blob;
+      try{blob=await canvasToJpegBlob(c,q)}finally{c.width=c.height=0}
+      best={blob,width:w,height:h,quality:q};
+      if(blob.size<=PHOTO_CFG.retryAboveBytes)break;
+    }
+    const t=drawJpegCanvas(img,PHOTO_CFG.thumbDim);
+    let thumb='';
+    try{thumb=t.c.toDataURL('image/jpeg',PHOTO_CFG.thumbQuality)}finally{t.c.width=t.c.height=0}
+    return {blob:best.blob,bytes:best.blob.size,width:best.width,height:best.height,quality:best.quality,
+            origWidth:ow,origHeight:oh,origBytes:file.size,thumb};
+  }finally{releaseImage(img)}
+}
+function blobToDataUrl(blob){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(r.result);
+    r.onerror=()=>reject(new UserError('Could not read the compressed image for the database fallback.'));
+    r.readAsDataURL(blob);
+  });
+}
+function withTimeout(promise,ms,message,code){
+  let t;
+  return Promise.race([
+    promise,
+    new Promise((_,rej)=>{t=setTimeout(()=>rej(Object.assign(new Error(message),{code:code||'cf/timeout'})),ms)})
+  ]).finally(()=>clearTimeout(t));
+}
+let fbConn=null,fbConnWatched=false;
+function watchFbConn(){
+  if(fbConnWatched||!db)return;
+  fbConnWatched=true;
+  try{db.ref('.info/connected').on('value',s=>{fbConn=s.val()===true},()=>{})}catch(_){}
+}
+function describeUploadError(err,stage){
+  if(err instanceof UserError)return err.message;
+  const c=(err&&err.code)||'',m=String((err&&err.message)||'');
+  if(c==='cf/timeout'||c==='cf/db-timeout')return m;
+  if(c==='storage/unauthorized'||c==='storage/unauthenticated')return 'Storage permission denied by security rules';
+  if(c==='PERMISSION_DENIED'||/permission[_ -]denied/i.test(m))return 'database permission denied by security rules';
+  if(c==='storage/canceled')return 'upload cancelled';
+  if(c==='storage/quota-exceeded')return 'Storage quota exceeded';
+  if(c==='storage/bucket-not-found'||c==='storage/project-not-found'||c==='cf/no-storage')return 'Firebase Storage is not available for this project';
+  if(c==='storage/retry-limit-exceeded'||c==='auth/network-request-failed'||/network|offline|failed to fetch/i.test(m))return 'network problem';
+  if(/too large|exceed|maximum|payload|limit/i.test(m))return 'payload too large for Firebase';
+  if(stage==='storage'&&(c==='storage/unknown'||!c))return 'Storage request failed (possible CORS or bucket configuration issue)';
+  return 'unexpected error'+(c?' ('+c+')':'');
+}
+function uploadBlobWithTimeout(path,blob,onPct,timeoutMs){
+  return new Promise((resolve,reject)=>{
+    if(!storage)return reject(Object.assign(new Error('Firebase Storage is not initialized.'),{code:'cf/no-storage'}));
+    let settled=false,timedOut=false,unsub=null,timer=null,task=null,ref=null;
+    const finish=(fn,v)=>{
+      if(settled)return;settled=true;clearTimeout(timer);
+      if(unsub){try{unsub()}catch(_){}unsub=null}
+      fn(v);
+    };
+    try{
+      ref=storage.ref(path);
+      task=ref.put(blob,{contentType:'image/jpeg',cacheControl:'public,max-age=31536000'});
+    }catch(err){return reject(err)}
+    timer=setTimeout(()=>{
+      timedOut=true;
+      try{task.cancel()}catch(_){}                                         // stop the pending transfer
+      finish(reject,Object.assign(new Error('Storage upload timed out after '+Math.round(timeoutMs/1000)+' seconds'),{code:'cf/timeout'}));
+    },timeoutMs);
+    // if the cancel did not stop it and the file still lands later, remove the orphan so nothing lingers in the bucket
+    try{task.then(()=>{if(timedOut)ref.delete().catch(()=>{})},()=>{})}catch(_){}
+    unsub=task.on('state_changed',
+      snap=>{if(onPct&&snap.totalBytes>0)onPct(Math.round(snap.bytesTransferred/snap.totalBytes*100))},
+      err=>finish(reject,err),
+      async()=>{try{const url=await ref.getDownloadURL();finish(resolve,{url,storagePath:path})}catch(e){finish(reject,e)}}
+    );
+  });
+}
+async function dbWriteGuarded(updates){
+  if(fbConn===false)throw new UserError('No connection to the Firebase database. Check your internet connection and try again.');
+  await withTimeout(db.ref().update(updates),PHOTO_CFG.dbTimeoutMs,'Database write did not complete within '+Math.round(PHOTO_CFG.dbTimeoutMs/1000)+' seconds (network?)','cf/db-timeout');
+}
+async function savePhoto({file,eventId,type,title,description,onStage}){
+  const stage=(k,d)=>{try{onStage&&onStage(k,d||{})}catch(_){}};
+  watchFbConn();
+  if(!db)throw new UserError('Firebase Database is not initialized.');
+  if(!eventId||!/^[\w.\-]+$/.test(String(eventId)))throw new UserError('Missing or invalid event ID.');
+  checkImage(file);
+  stage('compressing');
+  const c=await compressPhoto(file);
+  stage('compressed',{c});
+  const key=db.ref('cf/media').push().key;
+  const base={type:type||'photo',eventId,title,description:description||'',thumb:c.thumb,ts:Date.now()};
+  let storageErr=null;
+  if(storage){
+    stage('uploading',{pct:null});
+    const path='cf/photos/'+Date.now()+'_'+key+'.jpg';
+    let res=null;
+    try{res=await uploadBlobWithTimeout(path,c.blob,pct=>stage('uploading',{pct}),PHOTO_CFG.storageTimeoutMs)}
+    catch(e){storageErr=e}
+    if(res){
+      const record=Object.assign({},base,{src:res.url,storagePath:path});
+      try{await dbWriteGuarded({['cf/media/'+key]:record})}
+      catch(dbErr){
+        try{await storage.ref(path).delete()}catch(_){}                    // do not leave an unreferenced file behind
+        throw new UserError('The photo reached Storage but the database record could not be saved ('+describeUploadError(dbErr,'db')+').');
+      }
+      return {key,record,mode:'storage',c};
+    }
+  }else{
+    storageErr=Object.assign(new Error('Firebase Storage is not initialized.'),{code:'cf/no-storage'});
+  }
+  const reason=describeUploadError(storageErr,'storage');
+  stage('fallback',{reason});
+  if(c.bytes>PHOTO_CFG.fallbackMaxBytes){
+    throw new UserError('Storage failed ('+reason+') and the compressed photo ('+fmtBytes(c.bytes)+') is too large for the database fallback (limit '+fmtBytes(PHOTO_CFG.fallbackMaxBytes)+').');
+  }
+  const dataUrl=await blobToDataUrl(c.blob);                                // the COMPRESSED jpeg, never the original
+  const record=Object.assign({},base,{src:dataUrl,storagePath:''});
+  const u={};u['cf/media/'+key]=record;u['cf/mediaFull/'+key]=dataUrl;      // same shape the gallery already reads
+  try{await dbWriteGuarded(u)}
+  catch(dbErr){throw new UserError('Storage failed ('+reason+') and the database fallback also failed ('+describeUploadError(dbErr,'db')+').')}
+  return {key,record,mode:'fallback',c,storageReason:reason};
+}
+async function replaceBuiltinPhotosForEvent(eventId){
+  if(!db||!eventId)throw new UserError('Missing or invalid event ID.');
+  const ev=evById(eventId,true);
+  if(!ev||!Array.isArray(ev.photos)||!ev.photos.length)return 0;
+  const u={},pids=[];
+  ev.photos.forEach((p,idx)=>{
+    const pid=(p&&(p.photoId||p.id))||('builtin_'+ev.id+'_'+(idx+1));
+    if(isBuiltinPhotoDeleted(ev.id,pid))return;                            // already hidden → idempotent
+    u['cf/deletedPhotos/'+ev.id+'/'+pid]={eventId:ev.id,photoId:pid,deleted:true,replaced:true,deletedAt:firebase.database.ServerValue.TIMESTAMP};
+    pids.push(pid);
+  });
+  if(!pids.length)return 0;
+  await withTimeout(db.ref().update(u),PHOTO_CFG.dbTimeoutMs,'Database write did not complete within '+Math.round(PHOTO_CFG.dbTimeoutMs/1000)+' seconds (network?)','cf/db-timeout');
+  if(!deletedBuiltinPhotos[ev.id])deletedBuiltinPhotos[ev.id]={};
+  pids.forEach(pid=>{deletedBuiltinPhotos[ev.id][pid]=true});
+  return pids.length;
+}
+let photoUploadBusy=false;
+async function uploadPhotoBatch({files,eventId,type,description,titleFor,replaceBuiltin,ui,afterEach}){
+  ui=ui||{};
+  const summary={total:files.length,succeeded:0,viaStorage:0,viaFallback:0,failed:[],replaced:0,replaceError:null};
+  const say=(t,p)=>{try{ui.status&&ui.status(t,p)}catch(_){}};
+  const res=r=>{try{ui.result&&ui.result(r)}catch(_){}};
+  if(photoUploadBusy){
+    files.forEach(f=>summary.failed.push({name:f.name,reason:'another photo upload is already running'}));
+    return summary;
+  }
+  photoUploadBusy=true;
+  let replaceDone=false;
+  const tryReplace=async()=>{
+    if(replaceDone||replaceBuiltin===false)return;
+    try{summary.replaced+=await replaceBuiltinPhotosForEvent(eventId);replaceDone=true;summary.replaceError=null}
+    catch(e){summary.replaceError=describeUploadError(e,'db')}
+  };
+  try{
+    const total=files.length;
+    for(let i=0;i<total;i++){
+      const f=files[i],n=i+1,head='Uploading photo '+n+' of '+total;
+      let sizeLine='';
+      const at=x=>((i+x)/total)*100;
+      try{
+        const r=await savePhoto({file:f,eventId,type,title:titleFor(f,n,total),description,onStage:(k,d)=>{
+          if(k==='compressing')say(head+'\nPreparing image...\nCompressing image...',at(0.02));
+          else if(k==='compressed'){
+            sizeLine='Original: '+fmtBytes(d.c.origBytes)+' → Compressed: '+fmtBytes(d.c.bytes)+' ('+d.c.width+'×'+d.c.height+' px)';
+            say(head+'\n'+sizeLine+'\nStatus: Image optimized successfully.',at(0.2));
+          }else if(k==='uploading'){
+            say(head+'\n'+sizeLine+'\n'+(d.pct==null?'Contacting Firebase Storage (15 s limit)...':'Upload progress: '+d.pct+'%'),at(0.2+0.7*((d.pct||0)/100)));
+          }else if(k==='fallback'){
+            say(head+'\n'+sizeLine+'\nStorage unavailable ('+d.reason+') — using database fallback...',at(0.9));
+          }
+        }});
+        summary.succeeded++;
+        if(r.mode==='storage')summary.viaStorage++;else summary.viaFallback++;
+        if(!media.some(m=>m.id===r.key))media.push(Object.assign({id:r.key,remote:true},r.record));
+        res({ok:true,level:r.mode==='storage'?'ok':'warn',
+             text:'✓ '+f.name+' — '+fmtBytes(r.c.origBytes)+' → '+fmtBytes(r.c.bytes)+(r.mode==='storage'?' · saved to Firebase Storage':' · saved with database fallback (Storage: '+r.storageReason+')')});
+        say('Photo '+n+' of '+total+' uploaded successfully'+(r.mode==='fallback'?' (fallback)':'')+'.',at(1));
+        await tryReplace();
+        try{afterEach&&afterEach()}catch(_){}
+      }catch(err){
+        const reason=describeUploadError(err,'db');
+        summary.failed.push({name:f.name,reason});
+        res({ok:false,level:'err',text:'✗ '+f.name+' — '+reason});
+        say('Upload failed: '+reason,at(1));
+      }
+    }
+    if(summary.succeeded>0)await tryReplace();                              // retry once more if the first attempt failed
+  }finally{
+    photoUploadBusy=false;
+    try{renderAll()}catch(_){}
+  }
+  return summary;
+}
+function batchSummaryText(s,extraFailed){
+  const nBad=s.failed.length+(extraFailed||0);
+  let t=s.succeeded+' of '+(s.total+(extraFailed||0))+' photo'+((s.total+(extraFailed||0))===1?'':'s')+' saved';
+  if(s.viaFallback)t+=' ('+s.viaFallback+' via database fallback)';
+  t+='.';
+  if(!nBad&&!s.replaceError)t+=' Upload completed successfully.';
+  if(s.replaced)t+=' Old built-in photos for this event were replaced ('+s.replaced+' hidden).';
+  if(s.replaceError)t+=' Photos were saved, but the old built-in photos could not be hidden: '+s.replaceError+'.';
+  if(s.failed.length)t+=' Failed: '+s.failed.map(f=>f.name+' — '+f.reason).join('; ')+'.';
+  return t;
+}
+function photoLog(anchor){
+  let box=anchor.nextElementSibling;
+  if(!box||!box.classList.contains('photo-log')){
+    box=document.createElement('div');box.className='photo-log';
+    box.style.cssText='font-size:12.5px;line-height:1.5;margin-top:6px;max-height:170px;overflow:auto;word-break:break-word';
+    anchor.after(box);
+  }
+  return {
+    clear(){box.textContent=''},
+    add(text,level){
+      const d=document.createElement('div');d.textContent=text;
+      d.style.color=level==='err'?'var(--danger)':(level==='warn'?'#b45309':'var(--green)');
+      box.appendChild(d);
+    }
+  };
+}
+
 const adminReady=()=>!!(isAdmin&&auth&&auth.currentUser);
 
 async function deleteEventCascade(id){
@@ -2933,7 +3223,7 @@ function openAdmin(tab='dashboard',evId){
           </div>
         </div>
         <div id="mFileBox">
-          <label for="mFiles">SELECT IMAGE(S) (JPG, PNG, WEBP • AUTO-COMPRESSED TO JPEG ≤1080PX)</label>
+          <label for="mFiles">SELECT IMAGE(S) (JPG, PNG, WEBP • AUTO-COMPRESSED TO JPEG ≤1000PX)</label>
           <input id="mFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple style="padding:10px" aria-label="Select images (JPG, PNG, WEBP)">
         </div>
         <div id="mVideoBox" class="hidden">
@@ -3022,39 +3312,36 @@ function openAdmin(tab='dashboard',evId){
         }else{
           const files=[...($('#mFiles').files||[])];
           if(!files.length)throw new UserError('Please choose at least one image.');
-          files.forEach(checkImage);
-          msg.textContent='Preparing images...';
-          setProg(5);
-          let n=0,succeeded=0,failedNames=[];
-          for(const f of files){
-            n++;
-            try{
-              msg.textContent=`Compressing image ${n} of ${files.length}...`;
-              const fullRes=await processImageToJpeg(f,1080,0.82);
-              const thumbRes=await processImageToJpeg(f,480,0.72);
-              setProg(Math.round(((n-0.4)/files.length)*100));
-              msg.textContent=`Uploading image ${n} of ${files.length}...`;
-              const key=db.ref('cf/media').push().key,u={};
-              const itemTitle=files.length>1&&title?`${title} (${n})`:(title||f.name.replace(/\.[^/.]+$/,'')).slice(0,120);
-              u['cf/media/'+key]={type,eventId,title:itemTitle,description,thumb:thumbRes.dataUrl,src:fullRes.dataUrl,storagePath:'',ts:Date.now()};
-              u['cf/mediaFull/'+key]=fullRes.dataUrl;
-              await db.ref().update(u);
-              succeeded++;
-              setProg(Math.round((n/files.length)*100));
-            }catch(fileErr){
-              failedNames.push(f.name+': '+fbMsg(fileErr,'failed'));
-            }
+          msg.style.whiteSpace='pre-line';
+          const plog=photoLog(msg);plog.clear();
+          setProg(2);
+          const sum=await uploadPhotoBatch({
+            files,eventId,type,description,
+            replaceBuiltin:type==='photo',
+            titleFor:(f,n,total)=>total>1&&title?`${title} (${n})`:(title||f.name.replace(/\.[^/.]+$/,'')).slice(0,120),
+            ui:{status:(t,p)=>{msg.style.color='var(--ink)';msg.textContent=t;setProg(p)},result:r=>plog.add(r.text,r.level)}
+          });
+          const bad=sum.failed.length>0||!!sum.replaceError;
+          msg.style.color=bad?(sum.succeeded?'#b45309':'var(--danger)'):'var(--green)';
+          msg.textContent=batchSummaryText(sum);
+          setProg(sum.succeeded?100:0);
+          if(sum.succeeded){
+            toast(bad?sum.succeeded+' photo(s) saved; '+sum.failed.length+' failed.':'Media uploaded and synced to website!');
+            const fi=$('#mFiles');fi.value='';fi.dispatchEvent(new Event('change'));
+            try{renderAdminMediaList()}catch(_){}
+          }else{
+            toast('Upload failed: no photo could be saved.');
           }
-          if(failedNames.length){
-            throw new UserError(`${succeeded} of ${files.length} images uploaded. Failed: ${failedNames.join('; ')}`);
-          }
-          msg.textContent=`${succeeded} of ${files.length} images uploaded successfully.`;
+          btn.disabled=false;
+          return;
         }
         toast('Media uploaded and synced to website!');
         openAdmin('media',eventId);
       }catch(err){
         msg.style.color='var(--danger)';
         msg.textContent=fbMsg(err,'Upload failed. Check Firebase Storage and Database rules.');
+        btn.disabled=false;
+      }finally{
         btn.disabled=false;
       }
     };
@@ -3338,20 +3625,14 @@ function openAdmin(tab='dashboard',evId){
           await db.ref('cf/resources').push({title:evData.title+' (Document)',url:docUrl,cat:'Report',cls:evData.cls,eventId:eventRef.key,status:statusVal,ts:Date.now()});
         }
 
-        let failed=0,n=0;
-        for(const f of files){
-          n++;
-          msg.textContent='Compressing & uploading event photo '+n+' of '+files.length+'...';
-          try{
-            pBar.style.width=Math.round(35+((n-0.5)/files.length)*65)+'%';
-            const fullRes=await processImageToJpeg(f,1080,0.82);
-            const thumbRes=await processImageToJpeg(f,480,0.72);
-            const key=db.ref('cf/media').push().key,u={};
-            u['cf/media/'+key]={type:'photo',eventId:eventRef.key,title:evData.title+' (Photo '+n+')',thumb:thumbRes.dataUrl,src:fullRes.dataUrl,storagePath:'',ts:Date.now()};
-            u['cf/mediaFull/'+key]=fullRes.dataUrl;
-            await db.ref().update(u);
-            pBar.style.width=Math.round(35+(n/files.length)*65)+'%';
-          }catch(err){failed++;}
+        let failed=0;
+        if(files.length){
+          const sum=await uploadPhotoBatch({
+            files,eventId:eventRef.key,type:'photo',description:'',
+            titleFor:(f,n)=>evData.title+' (Photo '+n+')',
+            ui:{status:(t,p)=>{msg.textContent=t.replace(/\n/g,' · ');pBar.style.width=Math.round(35+(p/100)*65)+'%'}}
+          });
+          failed=sum.failed.length;
         }
         pBar.style.width='100%';
         toast(statusVal==='draft'?'Event saved as Draft!':(failed?'Event published, but '+failed+' photo(s) failed.':'Event published to website!'));
@@ -3443,7 +3724,7 @@ function openAdmin(tab='dashboard',evId){
           <p id="edPhotoStatus" role="status" class="fine" style="margin:0 0 8px;font-weight:600"></p>
           <div id="edExistingPhotos" class="ed-photo-grid"></div>
           <div class="ed-upload-box">
-            <label for="edPhotoFiles" class="ed-upload-label">SELECT IMAGE(S) (JPG, PNG, WEBP • AUTO-COMPRESSED TO JPEG ≤1080PX)</label>
+            <label for="edPhotoFiles" class="ed-upload-label">SELECT IMAGE(S) (JPG, PNG, WEBP • AUTO-COMPRESSED TO JPEG ≤1000PX)</label>
             <input id="edPhotoFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple style="padding:9px" aria-label="Select event photographs">
             <div id="edPhotoProgWrap" class="prog-wrap hidden" style="margin-top:8px"><div id="edPhotoProgBar" class="prog-bar"></div></div>
             <div id="edPhotoProgMeta" class="ed-prog-meta hidden"><span id="edPhotoProgText">Preparing images...</span><span id="edPhotoProgPct">0%</span></div>
@@ -3567,43 +3848,27 @@ function openAdmin(tab='dashboard',evId){
           if(!validFiles.length){
             throw new UserError(invalidMsgs.join(' '));
           }
-          const total=validFiles.length;
-          let completed=0,failedMsgs=[...invalidMsgs];
-          for(let idx=0;idx<total;idx++){
-            const f=validFiles[idx];
-            const num=idx+1;
-            try{
-              setEdProg(((idx+0.15)/total)*100,`Compressing image ${num} of ${total}...`);
-              const fullRes=await processImageToJpeg(f,1080,0.82);
-              const thumbRes=await processImageToJpeg(f,480,0.72);
-              setEdProg(((idx+0.55)/total)*100,`Uploading image ${num} of ${total}...`);
-              const key=db.ref('cf/media').push().key;
-              const existingCount=mediaFor(e.id).length;
-              const itemTitle=`${e.title} (Photo ${existingCount+1})`;
-              const record={type:'photo',eventId:e.id,title:itemTitle,description:'',thumb:thumbRes.dataUrl,src:fullRes.dataUrl,storagePath:'',ts:Date.now()};
-              const u={};
-              u['cf/media/'+key]=record;
-              u['cf/mediaFull/'+key]=fullRes.dataUrl;
-              await db.ref().update(u);
-              if(!media.some(m=>m.id===key)){
-                media.push(Object.assign({id:key,remote:true},record));
-              }
-              completed++;
-              renderEditPhotos();
-              setEdProg((num/total)*100,`Uploaded ${num} of ${total}...`);
-            }catch(itemErr){
-              failedMsgs.push(f.name+': '+fbMsg(itemErr,'upload failed'));
-            }
-          }
-          if(failedMsgs.length===0){
-            setEdProg(100,`${completed} of ${total} images uploaded successfully.`);
-            setPhotoStatus(`${completed} of ${total} images uploaded successfully.`,false);
-            toast(`${completed} photograph(s) added to event.`);
+          const baseCount=media.filter(m=>m.eventId===e.id&&m.type==='photo').length;
+          edProgText.style.whiteSpace='normal';
+          const plog=photoLog(edPhotoStatus);plog.clear();
+          invalidMsgs.forEach(t=>plog.add('✗ '+t,'err'));
+          const sum=await uploadPhotoBatch({
+            files:validFiles,eventId:e.id,type:'photo',description:'',
+            titleFor:(f,n)=>`${e.title} (Photo ${baseCount+n})`,
+            ui:{status:(t,p)=>setEdProg(p,t.replace(/\n/g,' · ')),result:r=>plog.add(r.text,r.level)},
+            afterEach:()=>renderEditPhotos()
+          });
+          renderEditPhotos();
+          const nBad=sum.failed.length+invalidMsgs.length;
+          const summaryTxt=batchSummaryText(sum,invalidMsgs.length);
+          if(!nBad&&!sum.replaceError){
+            setEdProg(100,'Upload completed successfully.');
+            setPhotoStatus(summaryTxt,false);
+            toast(`${sum.succeeded} photograph(s) added to event.`);
           }else{
-            const summary=`Upload completed with errors (${completed} of ${rawFiles.length} succeeded). ${failedMsgs.join(' | ')}`;
-            setEdProg(100,'Upload completed with errors.');
-            setPhotoStatus(summary,true);
-            toast(`Uploaded ${completed} photo(s); ${failedMsgs.length} failed.`);
+            setEdProg(sum.succeeded?100:0,sum.succeeded?'Upload completed with warnings.':'Upload failed.');
+            setPhotoStatus(summaryTxt,true);
+            toast(sum.succeeded?`Uploaded ${sum.succeeded} photo(s); ${nBad} issue(s).`:'Upload failed: no photo could be saved.');
           }
           edPhotoInput.value='';
         }catch(err){
