@@ -245,6 +245,11 @@ section.block p.sub{font-size:14px;line-height:1.8;color:#69758d;max-width:60ch;
 .feature-card h3{font-family:var(--head);font-size:19px;line-height:1.25;margin-top:8px;color:#17213b}
 .feature-card p{font-size:12px;line-height:1.7;color:#68758d;margin-top:8px}
 .feature-link{font-size:12px;font-weight:800;color:#244aa5;margin-top:auto;padding-top:16px}
+.feature-actions{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap;margin-top:auto;padding-top:16px}
+.feature-actions .feature-link{margin-top:0;padding-top:0;text-decoration:none}
+.feature-actions .feature-link:hover{text-decoration:underline}
+.feature-link-sub{font-size:11.5px;font-weight:600;color:#68758d;text-decoration:none;white-space:nowrap}
+.feature-link-sub:hover{color:#17213b;text-decoration:underline}
 .why-block{margin-top:70px;padding:65px 0;background:#f5f7fc;overflow:hidden}
 .why-layout{display:grid;grid-template-columns:.9fr 1.1fr;gap:75px;align-items:center}
 .why-visual{min-height:360px;display:grid;place-items:center;position:relative;border-radius:25px;background:linear-gradient(145deg,#dce7ff,#f6f8ff);overflow:hidden}
@@ -593,7 +598,7 @@ dl.meta dd{min-width:0}
     <div class="feature-grid">
       <a class="feature-card feature-blue" href="#events"><span class="feature-symbol">↗</span><span class="feature-label">01 / CAREER</span><h3>Career & industry sessions</h3><p>Discover professional pathways, placements and the skills employers value.</p><span class="feature-link">Explore events →</span></a>
       <a class="feature-card feature-gold" href="#events"><span class="feature-symbol">⌁</span><span class="feature-label">02 / EXPERIENCE</span><h3>Educational visits</h3><p>Connect classroom concepts with organisations, institutions and real-world practice.</p><span class="feature-link">Explore visits →</span></a>
-      <a class="feature-card feature-mint" href="#resources"><span class="feature-symbol">▤</span><span class="feature-label">03 / LEARN</span><h3>Reports & resources</h3><p>Find programme reports, shared study material and useful student documents.</p><span class="feature-link">Open resources →</span></a>
+      <div class="feature-card feature-mint"><span class="feature-symbol">▤</span><span class="feature-label">03 / LEARN</span><h3>Reports &amp; resources</h3><p>Find programme reports, shared study material and useful student documents.</p><div class="feature-actions"><a class="feature-link" href="#reports">View &amp; Download Reports →</a><a class="feature-link-sub" href="#resources">Resources →</a></div></div>
       <a class="feature-card feature-lilac" href="#gallery"><span class="feature-symbol">▧</span><span class="feature-label">04 / CAMPUS LIFE</span><h3>Photos & memories</h3><p>Revisit forum activities through event photos, posters and video highlights.</p><span class="feature-link">Visit gallery →</span></a>
     </div>
   </div>
@@ -657,8 +662,10 @@ dl.meta dd{min-width:0}
     <article class="rep-card" style="margin-bottom:14px">
       <h3>Commerce Forum — Complete Programme &amp; Reports (PDF)</h3>
       <p>Reference document containing the programme details and event summaries. New event-wise photos and videos can be added through the authorised admin panel.</p>
-      <a class="btn sm" href="#reports" id="openCompReportBtn" role="button">Open complete report (PDF)</a>
-      <a class="btn sm" href="#reports" id="dlCompReportBtn" role="button" style="margin-left:6px">Download PDF</a>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn sm" id="dlCompReportBtn" type="button">Download Complete Report (PDF)</button>
+        <button class="btn sm light" id="openCompReportBtn" type="button" style="border:1.5px solid var(--navy)">Preview Complete Report</button>
+      </div>
     </article>
     <div class="reports" id="reportsBody"></div>
   </div>
@@ -857,7 +864,7 @@ dl.meta dd{min-width:0}
   <a href="#home" class="on"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg>Home</a>
   <a href="#events"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/></svg>Events</a>
   <a href="#gallery"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M21 16l-5-4-8 7"/></svg>Gallery</a>
-  <a href="#resources"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM14 3v5h5"/></svg>Resources</a>
+  <a href="#reports"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h6M9 17h4"/></svg>Reports</a>
   <a href="#join"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>Join</a>
   <a href="#admin" id="tabAdminBtn" role="button"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span id="tabAdminLabel">Sign in</span></a>
 </nav>
@@ -1098,7 +1105,8 @@ const EVENT_MEDIA = {"imarticus-2025":{"poster":"data:image/jpeg;base64,/9j/4AAQ
 });
 
 /* ---------- STATE ---------- */
-let remoteEvents=[],media=[],resources=[],notices=[],applications=[],deletedBuiltinPhotos={},isAdmin=false,authAdminVerified=false,authStateResolved=false,db=null,auth=null,storage=null,siteSettings={},filter='all',gTab='photo',gEvent='all',gPhotoLimit=9;
+let remoteEvents=[],media=[],resources=[],notices=[],applications=[],deletedBuiltinPhotos={},isAdmin=false,authAdminVerified=false,authStateResolved=false,db=null,auth=null,storage=null,siteSettings={},filter='all',gTab='photo',gEvent='all',gPhotoLimit=5;
+const failedPhotoUrls=new Set();
 function isBuiltinPhotoDeleted(eventId,photoId){return !!(eventId&&photoId&&deletedBuiltinPhotos&&deletedBuiltinPhotos[eventId]&&deletedBuiltinPhotos[eventId][photoId]);}
 function activeBuiltinPhotosFor(ev){
   if(!ev||!Array.isArray(ev.photos))return [];
@@ -1703,11 +1711,24 @@ function docsFor(eid){
   const builtInDocs=(ev&&Array.isArray(ev.docs))?ev.docs:[];
   return builtInDocs.concat(resources.filter(r=>r.eventId===eid&&(r.status||'published')==='published'));
 }
+function validPhotoSrc(u){
+  const v=safeImg(u);
+  return (v&&!failedPhotoUrls.has(v))?v:'';
+}
 function allPhotos(){
-  return allEvents(false).flatMap(e=>{const b=activeBuiltinPhotosFor(e);return b.map((p,i)=>Object.assign({},p,{eventId:e.id,evTitle:e.title,evDate:e.dl||e.d,photoIdx:i+1,photoTotal:b.length}));}).concat(media.filter(m=>m.type==='photo').map(m=>{
+  const raw=allEvents(false).flatMap(e=>{const b=activeBuiltinPhotosFor(e);return b.map((p,i)=>Object.assign({},p,{eventId:e.id,evTitle:e.title,evDate:e.dl||e.d,photoIdx:i+1,photoTotal:b.length}));}).concat(media.filter(m=>m.type==='photo').map(m=>{
     const ev=evById(m.eventId);
     return Object.assign({},m,{evTitle:ev?ev.title:(m.title||'Commerce Forum Event'),evDate:ev?(ev.dl||ev.d):'Recent'});
   }));
+  const seen=new Set();
+  const out=[];
+  for(const item of raw){
+    const src=validPhotoSrc(item&&(item.src||item.thumb));
+    if(!src||seen.has(src))continue;
+    seen.add(src);
+    out.push(Object.assign({},item,{src:item.src?validPhotoSrc(item.src)||src:src,thumb:item.thumb?validPhotoSrc(item.thumb)||src:src}));
+  }
+  return out;
 }
 function fillEventSelect(){
   const s=$('#gEvent');if(!s)return;
@@ -1759,7 +1780,7 @@ function createGalleryCard(m,isCoverCard=false){
   b.innerHTML=`
     <div class="ph-thumb ${isCoverCard?'cover-thumb':''}">
       ${isCoverCard?'':`<span class="ph-badge">${esc(badgeText)}</span>`}
-      <img loading="lazy" alt="${esc(m.title||evTitle)}" src="${esc(m.src||m.thumb)}" onerror="var w=this.closest('.ph-wrap');if(w)w.style.display='none';">
+      <img ${String(m.src||m.thumb||'').startsWith('data:')?'decoding="async"':'loading="lazy" decoding="async"'} alt="${esc(m.title||evTitle)}" src="${esc(m.src||m.thumb)}">
     </div>
     <div class="ph-info">
       ${isCoverCard?`<span class="ph-badge cover-badge">${esc(badgeText)}</span>`:''}
@@ -1777,6 +1798,18 @@ function createGalleryCard(m,isCoverCard=false){
       openPhoto(m);
     }
   };
+  const imgEl=b.querySelector('img');
+  if(imgEl){
+    imgEl.addEventListener('error',()=>{
+      const bad=safeImg(m.src||m.thumb);
+      if(bad)failedPhotoUrls.add(bad);
+      if(w.parentNode)w.remove();
+      if(!isCoverCard&&typeof renderGallery==='function'){
+        clearTimeout(window.__galErrTimer);
+        window.__galErrTimer=setTimeout(()=>renderGallery(),0);
+      }
+    },{once:true});
+  }
   w.appendChild(b);
   if(isAdmin&&m.remote){
     const d=document.createElement('button');
@@ -1869,7 +1902,7 @@ function renderGallery(){
     const pg=document.createElement('div');pg.className='grid';pg.id='allPhotosGrid';
     photos.slice(0,visibleCount).forEach(m=>pg.appendChild(createGalleryCard(m,false)));
     box.appendChild(pg);
-    if(photos.length>9){
+    if(photos.length>5){
       const pager=document.createElement('div');
       pager.className='gal-pager';
       if(visibleCount<photos.length){
@@ -1877,11 +1910,11 @@ function renderGallery(){
         moreBtn.type='button';
         moreBtn.className='btn sm';
         moreBtn.id='galLoadMoreBtn';
-        moreBtn.textContent=`Load More Photos (${Math.min(9,photos.length-visibleCount)} more)`;
-        moreBtn.onclick=()=>{gPhotoLimit=Math.min(photos.length,gPhotoLimit+9);renderGallery();};
+        moreBtn.textContent=`Load More Photos (${Math.min(6,photos.length-visibleCount)} more)`;
+        moreBtn.onclick=()=>{gPhotoLimit=Math.min(photos.length,gPhotoLimit+6);renderGallery();};
         pager.appendChild(moreBtn);
       }
-      if(visibleCount>9){
+      if(visibleCount>5){
         const lessBtn=document.createElement('button');
         lessBtn.type='button';
         lessBtn.className='btn sm light';
@@ -1889,14 +1922,14 @@ function renderGallery(){
         lessBtn.style.border='1.5px solid var(--navy)';
         lessBtn.textContent='Show Less';
         lessBtn.onclick=()=>{
-          gPhotoLimit=9;
+          gPhotoLimit=5;
           renderGallery();
           const h=document.querySelector('#allPhotosGrid')?.previousElementSibling;
           if(h)h.scrollIntoView({behavior:'smooth',block:'start'});
         };
         pager.appendChild(lessBtn);
       }
-      box.appendChild(pager);
+      if(pager.children.length)box.appendChild(pager);
     }
   }
 }
@@ -1904,11 +1937,23 @@ function renderGallery(){
 function renderReports(){
   const box=$('#reportsBody');if(!box)return;
   box.innerHTML='';
-  allEvents(false).filter(e=>e.report||e.rep).forEach(e=>{
+  const evs=allEvents(false);
+  if(!evs.length){
+    box.innerHTML='<div class="note">No published event reports are available yet.</div>';
+    return;
+  }
+  evs.forEach(e=>{
     const c=document.createElement('article');c.className='rep-card';
-    const ph=mediaFor(e.id).filter(p=>p.src||p.thumb).slice(0,4).map(p=>'<img alt="" src="'+esc(p.src||p.thumb)+'">').join('');
-    c.innerHTML=(ph?'<div class="strip">'+ph+'</div>':'')+'<h3>'+esc(e.title)+'</h3><p><b>'+esc(e.dl)+'</b> · '+esc(e.rep||e.sum||'').slice(0,185)+(String(e.rep||e.sum||'').length>185?'…':'')+'</p>';
-    const b=document.createElement('button');b.className='btn sm';b.type='button';b.textContent='Read report';b.onclick=()=>openEvent(e.id);c.appendChild(b);box.appendChild(c);
+    const ph=mediaFor(e.id).map(p=>validPhotoSrc(p&&(p.src||p.thumb))).filter(Boolean).slice(0,4).map(u=>'<img alt="" src="'+esc(u)+'" onerror="this.remove()">').join('');
+    const snippetSource=String(e.rep||e.report||e.sum||'Detailed event report and programme summary available.');
+    const snippet=snippetSource.slice(0,185)+(snippetSource.length>185?'…':'');
+    c.innerHTML=(ph?'<div class="strip">'+ph+'</div>':'')+'<h3>'+esc(e.title)+'</h3><p><b>'+esc(e.dl||e.d||'Date TBA')+'</b> · '+esc(snippet)+'</p>';
+    const acts=document.createElement('div');
+    acts.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-top:6px';
+    const b=document.createElement('button');b.className='btn sm';b.type='button';b.textContent='Read & Download Report';b.onclick=()=>openEvent(e.id);
+    const dl=document.createElement('button');dl.className='btn sm light';dl.type='button';dl.style.border='1.5px solid var(--navy)';dl.textContent='Download PDF';dl.onclick=()=>generatePrintableReport('event',e.id);
+    acts.appendChild(b);acts.appendChild(dl);
+    c.appendChild(acts);box.appendChild(c);
   });
 }
 
@@ -1943,12 +1988,13 @@ function buildEventReportSectionHtml(e,idx,includePhotos=true){
   const rawPhotos=includePhotos?mediaFor(e.id).filter(p=>p&&(p.src||p.thumb)):[];
   const photoSources=[];
   const seen=new Set();
-  if(includePhotos&&e.poster){
-    seen.add(e.poster);
-    photoSources.push({src:e.poster,caption:(e.title||'Event')+' — Cover'});
+  const posterSrc=includePhotos?validPhotoSrc(e.poster):'';
+  if(posterSrc){
+    seen.add(posterSrc);
+    photoSources.push({src:posterSrc,caption:(e.title||'Event')+' — Cover'});
   }
   rawPhotos.forEach((p,pi)=>{
-    const u=p.src||p.thumb;
+    const u=validPhotoSrc(p.src||p.thumb);
     if(u&&!seen.has(u)){
       seen.add(u);
       photoSources.push({src:u,caption:p.title||`Photograph ${pi+1}`});
@@ -1978,7 +2024,7 @@ function buildEventReportSectionHtml(e,idx,includePhotos=true){
       ${e.sum?`<div class="rep-sec"><h3>Event Overview &amp; Summary</h3><p>${esc(e.sum)}</p></div>`:''}
       ${e.objectives?`<div class="rep-sec"><h3>Objectives</h3><p>${esc(e.objectives)}</p></div>`:''}
       ${e.highlights?`<div class="rep-sec"><h3>Key Activities &amp; Highlights</h3><p>${esc(e.highlights)}</p></div>`:''}
-      ${(e.rep||e.winners)?`<div class="rep-sec"><h3>Outcomes, Learning &amp; Detailed Report</h3>${e.winners?`<p><strong>Winners &amp; Results:</strong> ${esc(e.winners)}</p>`:''}${e.rep?`<p style="white-space:pre-line">${esc(e.rep)}</p>`:''}</div>`:''}
+      ${(e.rep||e.report||e.winners)?`<div class="rep-sec"><h3>Outcomes, Learning &amp; Detailed Report</h3>${e.winners?`<p><strong>Winners &amp; Results:</strong> ${esc(e.winners)}</p>`:''}${(e.rep||e.report)?`<p style="white-space:pre-line">${esc(e.rep||e.report)}</p>`:''}</div>`:(!e.sum?`<div class="rep-sec"><h3>Event Report</h3><p>Detailed narrative report for this programme is currently being compiled.</p></div>`:'')}
       ${photoSources.length?`
         <div class="rep-sec rep-photos-sec">
           <h3>Event Photographs &amp; Documentation (${photoSources.length})</h3>
@@ -2038,6 +2084,8 @@ async function generatePrintableReport(mode='compendium',eventId=null){
   .rep-photo-fig img{display:block;max-width:100%;max-height:210px;width:auto;height:auto;object-fit:contain;margin:0 auto;border-radius:4px}
   .rep-photo-fig figcaption{font-family:Arial,Helvetica,sans-serif;font-size:8.5pt;color:#475569;margin-top:4px;line-height:1.3}
   .rep-closing{margin-top:20px;padding-top:12px;border-top:1.5px solid #0f2557;display:flex;justify-content:space-between;gap:16px;font-family:Arial,Helvetica,sans-serif;font-size:9pt;color:#334155;break-inside:avoid}
+  .rep-doc-evtitle,.rep-sec h3{page-break-after:avoid;break-after:avoid}
+  .rep-meta-table td,.rep-sec p,.rep-doc-evtitle{overflow-wrap:anywhere;word-break:break-word}
   @media print{.rep-doc-section + .rep-doc-section{page-break-before:auto}}
 </style>
 </head>
@@ -4697,10 +4745,10 @@ const dlQrEl=$('#dlQr');if(dlQrEl)dlQrEl.onclick=()=>{
 };
 
 /* ---------- GALLERY TABS + NAV HIGHLIGHT ---------- */
-document.querySelectorAll('[data-g]').forEach(b=>b.onclick=()=>{gTab=b.dataset.g;gPhotoLimit=9;document.querySelectorAll('[data-g]').forEach(x=>x.setAttribute('aria-pressed',x===b));renderGallery()});
-$('#gEvent').onchange=e=>{gEvent=e.target.value;gPhotoLimit=9;renderGallery()};
+document.querySelectorAll('[data-g]').forEach(b=>b.onclick=()=>{gTab=b.dataset.g;gPhotoLimit=5;document.querySelectorAll('[data-g]').forEach(x=>x.setAttribute('aria-pressed',x===b));renderGallery()});
+$('#gEvent').onchange=e=>{gEvent=e.target.value;gPhotoLimit=5;renderGallery()};
 const secs=['home','discover','notices','events','gallery','reports','resources','join','faq'];
-const io=new IntersectionObserver(es=>es.forEach(en=>{if(en.isIntersecting){document.querySelectorAll('.top nav a,.tabbar a').forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+(en.target.id==='reports'?'gallery':en.target.id)))}}),{rootMargin:'-45% 0px -50% 0px'});
+const io=new IntersectionObserver(es=>es.forEach(en=>{if(en.isIntersecting){document.querySelectorAll('.top nav a,.tabbar a').forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+en.target.id))}}),{rootMargin:'-45% 0px -50% 0px'});
 secs.forEach(s=>{const el=document.getElementById(s);if(el)io.observe(el)});
 
 window.addEventListener('hashchange',()=>handleAdminHash(false));
