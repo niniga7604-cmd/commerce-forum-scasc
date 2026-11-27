@@ -529,6 +529,22 @@ dl.meta dd{min-width:0}
 .ed-upload-box{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
 .ed-upload-label{display:block;font-size:12px;font-weight:800;letter-spacing:.4px;color:var(--navy);margin-bottom:6px}
 .ed-prog-meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:700;color:var(--navy);margin-top:6px}
+
+/* ---------- ZERO-LAG MOBILE PERFORMANCE & IMAGE ENGINE LAYER ---------- */
+.ov,.conf-ov{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:rgba(8,16,40,.72)!important}
+.ph-badge{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:rgba(16,43,112,.92)!important}
+.ph,.rep-card,.card,.team-card,.notice-card,.adm-stat{box-shadow:0 2px 10px rgba(16,43,112,.06)!important}
+.ledger{box-shadow:0 4px 16px rgba(16,43,112,.08)!important}
+.ph-wrap,.rep-card{contain:content;content-visibility:auto;contain-intrinsic-size:auto 320px}
+.ledger .row{contain:content}
+.ph-thumb img,.ed-photo-thumb img,.strip img{background:#e6ecf7}
+.album-stage-loader,.lb-loader{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:4;background:rgba(11,18,38,.88);color:#fff;font-size:12px;font-weight:700;padding:6px 12px;border-radius:99px;border:1px solid rgba(255,255,255,.2);pointer-events:none;display:inline-flex;align-items:center;gap:6px}
+.album-stage-loader.hidden,.lb-loader.hidden{display:none!important}
+.url-upload-box{margin-top:14px;padding:12px;border-radius:10px;background:#f8faff;border:1.5px dashed #b9c9ee}
+.url-upload-box h5{margin:0 0 4px;font-size:13.5px;color:var(--navy);font-family:var(--head)}
+.url-upload-box textarea{min-height:74px;font-size:12.5px;font-family:monospace;line-height:1.45}
+.prog-sentinel{height:1px;width:100%;pointer-events:none}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 </style>
 </head>
 <body>
@@ -1159,7 +1175,7 @@ const EVENT_MEDIA = {"imarticus-2025":{"poster":"data:image/jpeg;base64,/9j/4AAQ
 });
 
 /* ---------- STATE ---------- */
-let remoteEvents=[],media=[],resources=[],notices=[],applications=[],deletedBuiltinPhotos={},isAdmin=false,authAdminVerified=false,authStateResolved=false,db=null,auth=null,storage=null,siteSettings={},filter='all',gTab='photo',gEvent='all',gPhotoLimit=5;
+let remoteEvents=[],media=[],resources=[],notices=[],applications=[],deletedBuiltinPhotos={},isAdmin=false,authAdminVerified=false,authStateResolved=false,db=null,auth=null,storage=null,siteSettings={},filter='all',gTab='photo',gEvent='all',gPhotoLimit=6,gCoverLimit=6,gReportLimit=6;
 const mediaMap=new Map();
 let mediaListDirty=true;
 function syncMediaArray(){
@@ -1571,6 +1587,332 @@ function handleAdminHash(fromAuthInit=false){
 
 const safeImg=u=>{u=String(u||'').trim();return /^data:image\/(png|jpe?g|webp|gif|svg\+xml);base64,[A-Za-z0-9+\/=]+$/i.test(u)?u:safeUrl(u)};
 const safeHeroHtml=t=>esc(t).replace(/&lt;br\s*\/?&gt;/gi,'<br>').replace(/&lt;em&gt;/gi,'<em>').replace(/&lt;\/em&gt;/gi,'</em>');
+
+/* ---------- MODULAR IMAGE, LEGACY THUMBNAIL, FULL-RES & URL ENGINES ---------- */
+const LIGHT_IMG_PLACEHOLDER="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 3'%3E%3Crect width='4' height='3' fill='%23e6ecf7'/%3E%3C/svg%3E";
+const isLargeDataUri=u=>typeof u==='string'&&u.startsWith('data:image/')&&u.length>52000;
+const hasDistinctCompactThumb=item=>{
+  if(!item)return false;
+  if(item.isExternalUrl&&item.url)return true;
+  if(!item.thumb)return false;
+  if(item.thumb===item.src&&isLargeDataUri(item.thumb))return false;
+  return !isLargeDataUri(item.thumb);
+};
+
+const LegacyThumbQueue=(()=>{
+  const MAX_CACHE=120,MAX_CONCURRENT=2,MAX_THUMB_DIM=420,THUMB_QUALITY=0.65;
+  const cache=new Map(),inFlight=new Map(),queue=[],pendingEls=new WeakMap();
+  let active=0,obs=null;
+
+  function hashKey(str){
+    let h=2166136261;
+    const step=Math.max(1,Math.floor(str.length/128));
+    for(let i=0;i<str.length;i+=step){h^=str.charCodeAt(i);h=Math.imul(h,16777619);}
+    return 'lt_'+str.length+'_'+(h>>>0).toString(36);
+  }
+  function getCached(k){
+    if(!cache.has(k))return '';
+    const v=cache.get(k);
+    cache.delete(k);cache.set(k,v);
+    return v;
+  }
+  function setCached(k,v){
+    if(!k||!v)return;
+    if(cache.has(k))cache.delete(k);
+    cache.set(k,v);
+    while(cache.size>MAX_CACHE){
+      const oldest=cache.keys().next().value;
+      cache.delete(oldest);
+    }
+  }
+  async function generateThumbFromSource(rawSrc){
+    const img=new Image();
+    img.decoding='async';
+    await new Promise((res,rej)=>{
+      let done=false;
+      const fin=fn=>{if(!done){done=true;fn();}};
+      img.onload=()=>fin(res);
+      img.onerror=()=>fin(()=>rej(new Error('decode_failed')));
+      img.src=rawSrc;
+    });
+    if(typeof img.decode==='function'){try{await img.decode();}catch(_){}}
+    const ow=img.naturalWidth||img.width,oh=img.naturalHeight||img.height;
+    if(!ow||!oh)throw new Error('invalid_dims');
+    const s=Math.min(1,MAX_THUMB_DIM/Math.max(ow,oh));
+    const w=Math.max(1,Math.round(ow*s)),h=Math.max(1,Math.round(oh*s));
+    const c=document.createElement('canvas');
+    c.width=w;c.height=h;
+    const ctx=c.getContext('2d',{alpha:false});
+    if(!ctx)throw new Error('no_ctx');
+    ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+    ctx.fillStyle='#ffffff';ctx.fillRect(0,0,w,h);
+    ctx.drawImage(img,0,0,w,h);
+    const out=c.toDataURL('image/jpeg',THUMB_QUALITY);
+    c.width=c.height=0;
+    img.src='';
+    return out;
+  }
+  function pump(){
+    while(active<MAX_CONCURRENT&&queue.length){
+      const job=queue.shift();
+      if(!job||!job.targets.some(el=>document.contains(el))){
+        if(job)inFlight.delete(job.key);
+        continue;
+      }
+      active++;
+      (async()=>{
+        try{
+          const thumbUrl=await generateThumbFromSource(job.rawSrc);
+          setCached(job.key,thumbUrl);
+          job.targets.forEach(el=>{
+            if(document.contains(el)&&el.dataset.thumbKey===job.key){
+              el.src=thumbUrl;
+            }
+          });
+        }catch(_){
+          job.targets.forEach(el=>{
+            if(document.contains(el)&&el.dataset.thumbKey===job.key&&el.src===LIGHT_IMG_PLACEHOLDER){
+              el.src=job.rawSrc;
+            }
+          });
+        }finally{
+          job.rawSrc='';
+          inFlight.delete(job.key);
+          active--;
+          if(queue.length){
+            if(typeof requestAnimationFrame==='function')requestAnimationFrame(pump);
+            else setTimeout(pump,0);
+          }
+        }
+      })();
+    }
+  }
+  function enqueue(imgEl,rawSrc,key){
+    const cached=getCached(key);
+    if(cached){imgEl.src=cached;return;}
+    if(!document.contains(imgEl))return;
+    const existing=inFlight.get(key);
+    if(existing){
+      if(!existing.targets.includes(imgEl))existing.targets.push(imgEl);
+      return;
+    }
+    const job={key,rawSrc,targets:[imgEl]};
+    inFlight.set(key,job);
+    queue.push(job);
+    pump();
+  }
+  function ensureObserver(){
+    if(obs||typeof IntersectionObserver!=='function')return;
+    obs=new IntersectionObserver(entries=>{
+      entries.forEach(en=>{
+        if(!en.isIntersecting)return;
+        const el=en.target;
+        obs.unobserve(el);
+        const info=pendingEls.get(el);
+        if(!info)return;
+        pendingEls.delete(el);
+        enqueue(el,info.rawSrc,info.key);
+      });
+    },{rootMargin:'260px 0px'});
+  }
+  function observe(imgEl,rawSrc,keyHint){
+    if(!imgEl||!rawSrc)return;
+    const key=keyHint||hashKey(rawSrc);
+    imgEl.dataset.thumbKey=key;
+    const cached=getCached(key);
+    if(cached){imgEl.src=cached;return;}
+    imgEl.src=LIGHT_IMG_PLACEHOLDER;
+    if(typeof IntersectionObserver==='function'){
+      ensureObserver();
+      pendingEls.set(imgEl,{rawSrc,key});
+      obs.observe(imgEl);
+    }else{
+      enqueue(imgEl,rawSrc,key);
+    }
+  }
+  function clearPending(){
+    if(obs){try{obs.disconnect();}catch(_){}obs=null;}
+    queue.length=0;
+  }
+  return {observe,clearPending,getCacheSize:()=>cache.size};
+})();
+
+function attachThumbnailToImg(imgEl,item){
+  if(!imgEl||!item)return;
+  const full=validPhotoSrc(item.url||item.src||item.thumb);
+  const compact=hasDistinctCompactThumb(item)?validPhotoSrc(item.thumb||item.url||item.src):'';
+  if(compact){
+    imgEl.src=compact;
+    return;
+  }
+  if(full&&isLargeDataUri(full)){
+    const keyHint=item.id||item.photoId||'';
+    LegacyThumbQueue.observe(imgEl,full,keyHint);
+    return;
+  }
+  if(full)imgEl.src=full;
+}
+
+const FullResLoader=(()=>{
+  let activeSeq=0;
+  async function loadInto(imgEl,loaderEl,item,fallbackAlt){
+    const seq=++activeSeq;
+    if(!imgEl||!item)return;
+    if(loaderEl)loaderEl.classList.remove('hidden');
+    let targetSrc=validPhotoSrc(item.url||item.src||item.thumb);
+    if(item.remote&&item.id&&!item.isExternalUrl&&db){
+      try{
+        const snap=await db.ref('cf/mediaFull/'+item.id).once('value');
+        if(seq!==activeSeq||!document.contains(imgEl))return;
+        const val=safeImg(snap.val());
+        if(val)targetSrc=val;
+      }catch(_){}
+    }
+    if(seq!==activeSeq||!document.contains(imgEl))return;
+    if(!targetSrc){
+      if(loaderEl)loaderEl.classList.add('hidden');
+      return;
+    }
+    const pre=new Image();
+    pre.decoding='async';
+    pre.src=targetSrc;
+    try{
+      if(typeof pre.decode==='function'){
+        await pre.decode();
+      }else{
+        await new Promise((res,rej)=>{pre.onload=res;pre.onerror=rej;});
+      }
+      if(seq!==activeSeq||!document.contains(imgEl))return;
+      imgEl.src=targetSrc;
+      if(fallbackAlt)imgEl.alt=fallbackAlt;
+    }catch(_){
+      if(seq!==activeSeq||!document.contains(imgEl))return;
+      if(!imgEl.src||imgEl.src===LIGHT_IMG_PLACEHOLDER){
+        const fb=validPhotoSrc(item.thumb||item.url||item.src);
+        if(fb)imgEl.src=fb;
+      }
+    }finally{
+      pre.src='';
+      if(seq===activeSeq&&loaderEl)loaderEl.classList.add('hidden');
+    }
+  }
+  function cancel(){activeSeq++;}
+  return {loadInto,cancel};
+})();
+
+const UrlNormalizer=(()=>{
+  function parseUrlInput(raw){
+    return [...new Set(String(raw||'').split(/[\r\n,]+/).map(s=>s.trim()).filter(Boolean))];
+  }
+  function normalizeDirectImageUrl(raw){
+    let u=String(raw||'').trim();
+    if(!u)return {ok:false,reason:'Empty URL'};
+    let parsed;
+    try{parsed=new URL(u);}catch(_){return {ok:false,reason:'Invalid URL syntax'};}
+    if(parsed.protocol!=='https:'&&parsed.protocol!=='http:'){
+      return {ok:false,reason:'Only HTTP/HTTPS image URLs are allowed'};
+    }
+    const host=parsed.hostname.toLowerCase();
+    if(host==='github.com'){
+      const m=parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
+      if(m){
+        u=`https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}`;
+      }
+    }else if(host==='drive.google.com'){
+      const m1=parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]{15,})/);
+      const m2=parsed.searchParams.get('id');
+      const fid=(m1&&m1[1])||(m2&&/^[a-zA-Z0-9_-]{15,}$/.test(m2)?m2:'');
+      if(!fid)return {ok:false,reason:'Google Drive link does not contain a valid file ID'};
+      u=`https://drive.google.com/uc?export=view&id=${fid}`;
+    }else if(host==='ibb.co'){
+      return {ok:false,reason:'Use the direct ImgBB image link (i.ibb.co/...), not the ibb.co page link'};
+    }
+    return {ok:true,url:u};
+  }
+  function verifyImageLoadable(url,timeoutMs=12000){
+    return new Promise((resolve,reject)=>{
+      const img=new Image();
+      let done=false;
+      const timer=setTimeout(()=>{
+        if(done)return;done=true;
+        img.src='';
+        reject(new Error('Image timed out while loading'));
+      },timeoutMs);
+      img.onload=()=>{
+        if(done)return;done=true;clearTimeout(timer);
+        const w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;
+        img.src='';
+        if(!w||!h)return reject(new Error('URL did not return a valid image'));
+        resolve({ok:true,width:w,height:h});
+      };
+      img.onerror=()=>{
+        if(done)return;done=true;clearTimeout(timer);
+        img.src='';
+        reject(new Error('Image could not be loaded (check public access or URL)'));
+      };
+      img.src=url;
+    });
+  }
+  return {parseUrlInput,normalizeDirectImageUrl,verifyImageLoadable};
+})();
+
+async function saveDirectImageUrls({urlsText,eventId,type='photo',title='',description='',replaceBuiltin=false,ui={}}){
+  if(!db)throw new UserError('Firebase Database is not initialized.');
+  if(!eventId||!/^[\w.\-]+$/.test(String(eventId)))throw new UserError('Missing or invalid event ID.');
+  const rawList=UrlNormalizer.parseUrlInput(urlsText);
+  if(!rawList.length)throw new UserError('Paste at least one image URL.');
+  const summary={total:rawList.length,succeeded:0,failed:[]};
+  let replacePromise=null;
+  const tryReplace=()=>{
+    if(!replaceBuiltin)return Promise.resolve();
+    if(!replacePromise){
+      replacePromise=replaceBuiltinPhotosForEvent(eventId).catch(()=>{replacePromise=null;});
+    }
+    return replacePromise;
+  };
+  for(let i=0;i<rawList.length;i++){
+    const raw=rawList[i],rowId='u_'+i;
+    const norm=UrlNormalizer.normalizeDirectImageUrl(raw);
+    if(!norm.ok){
+      summary.failed.push({url:raw,reason:norm.reason});
+      ui.result&&ui.result({id:rowId,text:`✗ ${raw} — ${norm.reason}`,level:'err'});
+      continue;
+    }
+    ui.result&&ui.result({id:rowId,text:`⏳ Verifying ${norm.url}...`,level:'pending'});
+    ui.status&&ui.status(`Verifying URL ${i+1} of ${rawList.length}...`,((i+0.2)/rawList.length)*100);
+    try{
+      await UrlNormalizer.verifyImageLoadable(norm.url);
+      const key=db.ref('cf/media').push().key;
+      const itemTitle=rawList.length>1&&title?`${title} (${i+1})`:(title||`External Photo ${i+1}`);
+      const record={
+        type:type||'photo',
+        eventId,
+        title:itemTitle.slice(0,120),
+        description:(description||'').slice(0,300),
+        url:norm.url,
+        thumb:norm.url,
+        src:norm.url,
+        isExternalUrl:true,
+        storagePath:'',
+        ts:Date.now()
+      };
+      await dbWriteGuarded({['cf/media/'+key]:record});
+      upsertMediaItem(key,record);
+      syncMediaArray();
+      summary.succeeded++;
+      ui.result&&ui.result({id:rowId,text:`✓ Added URL — ${norm.url}`,level:'ok'});
+      ui.status&&ui.status(`Saved ${summary.succeeded} of ${rawList.length} URL(s)...`,((i+1)/rawList.length)*100);
+      await tryReplace();
+      ui.afterEach&&ui.afterEach();
+    }catch(err){
+      const reason=(err&&err.message)||'Could not verify image URL';
+      summary.failed.push({url:norm.url,reason});
+      ui.result&&ui.result({id:rowId,text:`✗ ${norm.url} — ${reason}`,level:'err'});
+    }
+  }
+  scheduleRender('media');
+  return summary;
+}
 const WA_DEFAULT='919372503446';
 
 function applySiteSettings(){
@@ -1843,10 +2185,10 @@ function allPhotos(){
   const seen=new Set();
   const out=[];
   for(const item of raw){
-    const src=validPhotoSrc(item&&(item.src||item.thumb));
+    const src=validPhotoSrc(item&&(item.url||item.src||item.thumb));
     if(!src||seen.has(src))continue;
     seen.add(src);
-    out.push(Object.assign({},item,{src:item.src?validPhotoSrc(item.src)||src:src,thumb:item.thumb?validPhotoSrc(item.thumb)||src:src}));
+    out.push(Object.assign({},item,{src:item.src?validPhotoSrc(item.src)||src:src,thumb:item.thumb?validPhotoSrc(item.thumb)||src:src,url:item.url?validPhotoSrc(item.url):''}));
   }
   return out;
 }
@@ -1900,7 +2242,7 @@ function createGalleryCard(m,isCoverCard=false){
   b.innerHTML=`
     <div class="ph-thumb ${isCoverCard?'cover-thumb':''}">
       ${isCoverCard?'':`<span class="ph-badge">${esc(badgeText)}</span>`}
-      <img loading="lazy" decoding="async" alt="${esc(m.title||evTitle)}" src="${esc(m.thumb||m.src)}">
+      <img loading="lazy" decoding="async" alt="${esc(m.title||evTitle)}">
     </div>
     <div class="ph-info">
       ${isCoverCard?`<span class="ph-badge cover-badge">${esc(badgeText)}</span>`:''}
@@ -1920,6 +2262,7 @@ function createGalleryCard(m,isCoverCard=false){
   };
   const imgEl=b.querySelector('img');
   if(imgEl){
+    attachThumbnailToImg(imgEl,m);
     imgEl.addEventListener('error',()=>{
       const bad=safeImg(m.src||m.thumb);
       if(bad)failedPhotoUrls.add(bad);
@@ -2001,17 +2344,54 @@ function renderGallery(){
     return;
   }
 
+  if(window.__galCoverObs){try{window.__galCoverObs.disconnect();}catch(_){}window.__galCoverObs=null;}
+  if(window.__galPhotoObs){try{window.__galPhotoObs.disconnect();}catch(_){}window.__galPhotoObs=null;}
+
   if(covers.length){
+    let visibleCovers=Math.min(covers.length,gCoverLimit);
     const cHead=document.createElement('div');
     cHead.className='gal-subhead';
     cHead.style.marginTop='4px';
-    cHead.innerHTML=`<h3>Event Cover Pages (${covers.length})</h3><span>Click any event cover page to open its complete photo album</span>`;
+    cHead.innerHTML=`<h3>Event Cover Pages (${covers.length})</h3><span id="galCoverCountLabel">Showing ${visibleCovers} of ${covers.length} · Click any cover page to open its album</span>`;
     box.appendChild(cHead);
-    const cg=document.createElement('div');cg.className='grid';
+    const cg=document.createElement('div');cg.className='grid';cg.id='allCoversGrid';
     const cFrag=document.createDocumentFragment();
-    covers.forEach(m=>cFrag.appendChild(createGalleryCard(m,true)));
+    covers.slice(0,visibleCovers).forEach(m=>cFrag.appendChild(createGalleryCard(m,true)));
     cg.appendChild(cFrag);
     box.appendChild(cg);
+    if(covers.length>6){
+      const cPager=document.createElement('div');cPager.className='gal-pager';
+      const cSent=document.createElement('div');cSent.className='prog-sentinel';
+      const appendCovers=()=>{
+        if(visibleCovers>=covers.length)return;
+        const prev=visibleCovers,next=Math.min(covers.length,prev+6);
+        gCoverLimit=next;visibleCovers=next;
+        requestAnimationFrame(()=>{
+          const frag=document.createDocumentFragment();
+          covers.slice(prev,next).forEach(m=>frag.appendChild(createGalleryCard(m,true)));
+          cg.appendChild(frag);
+          syncCoverPager();
+        });
+      };
+      const syncCoverPager=()=>{
+        const lbl=$('#galCoverCountLabel');
+        if(lbl)lbl.textContent=`Showing ${visibleCovers} of ${covers.length} · Click any cover page to open its album`;
+        cPager.innerHTML='';
+        if(visibleCovers<covers.length){
+          const b=document.createElement('button');b.type='button';b.className='btn sm light';b.style.border='1.5px solid var(--navy)';
+          b.textContent=`Load More Covers (${Math.min(6,covers.length-visibleCovers)} more)`;
+          b.onclick=appendCovers;
+          cPager.appendChild(b);
+        }else if(window.__galCoverObs){window.__galCoverObs.disconnect();window.__galCoverObs=null;}
+      };
+      syncCoverPager();
+      box.appendChild(cSent);
+      box.appendChild(cPager);
+      if(typeof IntersectionObserver==='function'){
+        window.__galCoverObs=new IntersectionObserver(es=>{if(es.some(e=>e.isIntersecting))appendCovers();},{rootMargin:'220px 0px'});
+        window.__galCoverObs.observe(cSent);
+      }
+    }
   }
 
   if(photos.length){
@@ -2026,41 +2406,37 @@ function renderGallery(){
     photos.slice(0,visibleCount).forEach(m=>pFrag.appendChild(createGalleryCard(m,false)));
     pg.appendChild(pFrag);
     box.appendChild(pg);
-    if(photos.length>5){
-      const pager=document.createElement('div');
-      pager.className='gal-pager';
+    if(photos.length>6){
+      const pager=document.createElement('div');pager.className='gal-pager';
+      const pSent=document.createElement('div');pSent.className='prog-sentinel';
+      const appendPhotos=()=>{
+        if(visibleCount>=photos.length)return;
+        const prev=visibleCount,next=Math.min(photos.length,prev+6);
+        gPhotoLimit=next;visibleCount=next;
+        requestAnimationFrame(()=>{
+          const frag=document.createDocumentFragment();
+          photos.slice(prev,next).forEach(m=>frag.appendChild(createGalleryCard(m,false)));
+          pg.appendChild(frag);
+          syncPager();
+        });
+      };
       const syncPager=()=>{
         const lbl=$('#galPhotoCountLabel');
         if(lbl)lbl.textContent=`Showing ${visibleCount} of ${photos.length} · Click any photo to browse the full event album`;
         pager.innerHTML='';
         if(visibleCount<photos.length){
           const moreBtn=document.createElement('button');
-          moreBtn.type='button';
-          moreBtn.className='btn sm';
-          moreBtn.id='galLoadMoreBtn';
+          moreBtn.type='button';moreBtn.className='btn sm';moreBtn.id='galLoadMoreBtn';
           moreBtn.textContent=`Load More Photos (${Math.min(6,photos.length-visibleCount)} more)`;
-          moreBtn.onclick=()=>{
-            const prev=visibleCount;
-            const next=Math.min(photos.length,prev+6);
-            gPhotoLimit=next;
-            visibleCount=next;
-            const frag=document.createDocumentFragment();
-            photos.slice(prev,next).forEach(m=>frag.appendChild(createGalleryCard(m,false)));
-            pg.appendChild(frag);
-            syncPager();
-          };
+          moreBtn.onclick=appendPhotos;
           pager.appendChild(moreBtn);
-        }
-        if(visibleCount>5){
+        }else if(window.__galPhotoObs){window.__galPhotoObs.disconnect();window.__galPhotoObs=null;}
+        if(visibleCount>6){
           const lessBtn=document.createElement('button');
-          lessBtn.type='button';
-          lessBtn.className='btn sm light';
-          lessBtn.id='galShowLessBtn';
-          lessBtn.style.border='1.5px solid var(--navy)';
-          lessBtn.textContent='Show Less';
+          lessBtn.type='button';lessBtn.className='btn sm light';lessBtn.id='galShowLessBtn';
+          lessBtn.style.border='1.5px solid var(--navy)';lessBtn.textContent='Show Less';
           lessBtn.onclick=()=>{
-            gPhotoLimit=5;
-            visibleCount=Math.min(photos.length,5);
+            gPhotoLimit=6;visibleCount=Math.min(photos.length,6);
             while(pg.children.length>visibleCount)pg.lastElementChild.remove();
             syncPager();
             pHead.scrollIntoView({behavior:'smooth',block:'start'});
@@ -2069,32 +2445,88 @@ function renderGallery(){
         }
       };
       syncPager();
+      box.appendChild(pSent);
       box.appendChild(pager);
+      if(typeof IntersectionObserver==='function'){
+        window.__galPhotoObs=new IntersectionObserver(es=>{if(es.some(e=>e.isIntersecting))appendPhotos();},{rootMargin:'220px 0px'});
+        window.__galPhotoObs.observe(pSent);
+      }
     }
   }
 }
 
 function renderReports(){
   const box=$('#reportsBody');if(!box)return;
+  if(window.__repObs){try{window.__repObs.disconnect();}catch(_){}window.__repObs=null;}
+  const oldPager=document.getElementById('repPagerWrap');if(oldPager)oldPager.remove();
   box.innerHTML='';
   const evs=allEvents(false);
   if(!evs.length){
     box.innerHTML='<div class="note">No published event reports are available yet.</div>';
     return;
   }
-  evs.forEach(e=>{
+  const makeReportCard=e=>{
     const c=document.createElement('article');c.className='rep-card';
-    const ph=mediaFor(e.id).map(p=>validPhotoSrc(p&&(p.thumb||p.src))).filter(Boolean).slice(0,4).map(u=>'<img loading="lazy" decoding="async" alt="" src="'+esc(u)+'" onerror="this.remove()">').join('');
+    const stripItems=mediaFor(e.id).filter(p=>validPhotoSrc(p&&(p.url||p.thumb||p.src))).slice(0,4);
+    if(stripItems.length){
+      const strip=document.createElement('div');strip.className='strip';
+      stripItems.forEach(p=>{
+        const im=document.createElement('img');im.loading='lazy';im.decoding='async';im.alt='';
+        im.onerror=()=>im.remove();
+        attachThumbnailToImg(im,p);
+        strip.appendChild(im);
+      });
+      c.appendChild(strip);
+    }
+    const h3=document.createElement('h3');h3.textContent=e.title||'';c.appendChild(h3);
     const snippetSource=String(e.rep||e.report||e.sum||'Detailed event report and programme summary available.');
     const snippet=snippetSource.slice(0,185)+(snippetSource.length>185?'…':'');
-    c.innerHTML=(ph?'<div class="strip">'+ph+'</div>':'')+'<h3>'+esc(e.title)+'</h3><p><b>'+esc(e.dl||e.d||'Date TBA')+'</b> · '+esc(snippet)+'</p>';
+    const pEl=document.createElement('p');
+    pEl.innerHTML='<b>'+esc(e.dl||e.d||'Date TBA')+'</b> · '+esc(snippet);
+    c.appendChild(pEl);
     const acts=document.createElement('div');
     acts.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-top:6px';
     const b=document.createElement('button');b.className='btn sm';b.type='button';b.textContent='Read & Download Report';b.onclick=()=>openEvent(e.id);
     const dl=document.createElement('button');dl.className='btn sm light';dl.type='button';dl.style.border='1.5px solid var(--navy)';dl.textContent='Download PDF';dl.onclick=()=>generatePrintableReport('event',e.id);
     acts.appendChild(b);acts.appendChild(dl);
-    c.appendChild(acts);box.appendChild(c);
-  });
+    c.appendChild(acts);
+    return c;
+  };
+  let visibleRep=Math.min(evs.length,gReportLimit);
+  const frag=document.createDocumentFragment();
+  evs.slice(0,visibleRep).forEach(e=>frag.appendChild(makeReportCard(e)));
+  box.appendChild(frag);
+  if(evs.length>6){
+    const pagerWrap=document.createElement('div');pagerWrap.id='repPagerWrap';pagerWrap.className='gal-pager';
+    const sent=document.createElement('div');sent.className='prog-sentinel';
+    const appendMore=()=>{
+      if(visibleRep>=evs.length)return;
+      const prev=visibleRep,next=Math.min(evs.length,prev+6);
+      gReportLimit=next;visibleRep=next;
+      requestAnimationFrame(()=>{
+        const f=document.createDocumentFragment();
+        evs.slice(prev,next).forEach(e=>f.appendChild(makeReportCard(e)));
+        box.appendChild(f);
+        syncRepPager();
+      });
+    };
+    const syncRepPager=()=>{
+      pagerWrap.innerHTML='';
+      if(visibleRep<evs.length){
+        const btn=document.createElement('button');btn.type='button';btn.className='btn sm';
+        btn.textContent=`Load More Reports (${Math.min(6,evs.length-visibleRep)} more)`;
+        btn.onclick=appendMore;
+        pagerWrap.appendChild(btn);
+      }else if(window.__repObs){window.__repObs.disconnect();window.__repObs=null;}
+    };
+    syncRepPager();
+    box.after(pagerWrap);
+    box.after(sent);
+    if(typeof IntersectionObserver==='function'){
+      window.__repObs=new IntersectionObserver(es=>{if(es.some(e=>e.isIntersecting))appendMore();},{rootMargin:'220px 0px'});
+      window.__repObs.observe(sent);
+    }
+  }
 }
 
 function renderRes(){
@@ -2134,7 +2566,7 @@ function buildEventReportSectionHtml(e,idx,includePhotos=true){
     photoSources.push({src:posterSrc,caption:(e.title||'Event')+' — Cover'});
   }
   rawPhotos.forEach((p,pi)=>{
-    const u=validPhotoSrc(p.src||p.thumb);
+    const u=validPhotoSrc(p.url||p.src||p.thumb);
     if(u&&!seen.has(u)){
       seen.add(u);
       photoSources.push({src:u,caption:p.title||`Photograph ${pi+1}`});
@@ -2349,7 +2781,7 @@ function modal(html,cls){
   o.querySelector('.close').onclick=closeModal;
   $('#modalRoot').appendChild(o);document.body.style.overflow='hidden';o.querySelector('.close').focus();return o;
 }
-function closeModal(){removeOv();document.body.style.overflow='';if(lastFocus&&lastFocus.focus&&document.contains(lastFocus)){try{lastFocus.focus()}catch(_){}}lastFocus=null}
+function closeModal(){FullResLoader.cancel();const st=$('#albMainImg');if(st)st.src='';const lb=$('#lbImg');if(lb)lb.src='';removeOv();document.body.style.overflow='';if(lastFocus&&lastFocus.focus&&document.contains(lastFocus)){try{lastFocus.focus()}catch(_){}}lastFocus=null}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 
 function renderEventDetailHtml(e,ph,vids,posters,docs,isPreview=false){
@@ -2362,7 +2794,7 @@ function renderEventDetailHtml(e,ph,vids,posters,docs,isPreview=false){
   if(e.rep)h+='<h4>Event report</h4><p style="white-space:pre-line">'+esc(e.rep)+'</p>';
   if(e.who)h+='<h4>Organising committee &amp; guidance</h4><p>'+esc(e.who)+'</p>';
   const allEvPosters=(e.poster?[{thumb:e.poster,src:e.poster,title:'Official Poster'}]:[]).concat(posters||[]);
-  if(allEvPosters.length)h+='<h4>Official Poster / Cover</h4><div style="max-width:380px;margin:12px auto 16px;text-align:center">'+allEvPosters.map(p=>'<img alt="Event poster" src="'+esc(p.thumb||p.src)+'" style="border-radius:12px;width:100%;box-shadow:0 6px 20px rgba(16,43,112,0.14)">').join('')+'</div>';
+  if(allEvPosters.length)h+='<h4>Official Poster / Cover</h4><div style="max-width:380px;margin:12px auto 16px;text-align:center">'+allEvPosters.map(p=>'<img loading="lazy" decoding="async" alt="Event poster" src="'+esc(p.thumb||p.src)+'" style="border-radius:12px;width:100%;box-shadow:0 6px 20px rgba(16,43,112,0.14)">').join('')+'</div>';
   if(ph&&ph.length)h+='<h4>Event Photo Album ('+ph.length+')</h4><div class="grid" id="evPh"></div>';
   if(vids&&vids.length)h+='<h4>Event Videos ('+vids.length+')</h4><div id="evVid"></div>';
   if(docs&&docs.length)h+='<h4>Related Documents</h4><div id="evDocs"></div>';
@@ -2469,8 +2901,9 @@ function openEventAlbumModal(eventId,initialTarget=0){
 
     <div class="album-stage" id="albumStage">
       <div class="album-stage-img-wrap">
+        <div class="album-stage-loader hidden" id="albLoader">Loading full resolution...</div>
         ${albumItems.length>1?'<button type="button" class="album-nav-btn prev-btn" id="albPrev" aria-label="Previous photo">‹</button>':''}
-        <img id="albMainImg" alt="${esc(e.title)}" src="${esc(albumItems[curIdx].src||albumItems[curIdx].thumb)}">
+        <img id="albMainImg" alt="${esc(e.title)}" src="${esc(hasDistinctCompactThumb(albumItems[curIdx])?(albumItems[curIdx].thumb||albumItems[curIdx].url||albumItems[curIdx].src):LIGHT_IMG_PLACEHOLDER)}">
         ${albumItems.length>1?'<button type="button" class="album-nav-btn next-btn" id="albNext" aria-label="Next photo">›</button>':''}
       </div>
       <div class="album-stage-bar">
@@ -2488,6 +2921,7 @@ function openEventAlbumModal(eventId,initialTarget=0){
 
   const o=modal(html,'adm-sheet');
   const mainImg=o.querySelector('#albMainImg');
+  const loaderEl=o.querySelector('#albLoader');
   const capEl=o.querySelector('#albCaption');
   const cntEl=o.querySelector('#albCounter');
   const gridEl=o.querySelector('#albThumbsGrid');
@@ -2495,17 +2929,16 @@ function openEventAlbumModal(eventId,initialTarget=0){
   const setActive=idx=>{
     curIdx=(idx+albumItems.length)%albumItems.length;
     const item=albumItems[curIdx];
-    mainImg.src=item.src||item.thumb;
+    attachThumbnailToImg(mainImg,item);
     mainImg.alt=item.title||e.title;
     capEl.textContent=item.title||e.title;
     cntEl.textContent=`Image ${curIdx+1} of ${albumItems.length}`;
-    if(item.remote&&item.id&&db){
-      db.ref('cf/mediaFull/'+item.id).once('value').then(s=>{if(s.val()&&mainImg)mainImg.src=s.val()});
-    }
+    FullResLoader.loadInto(mainImg,loaderEl,item,item.title||e.title);
     gridEl.querySelectorAll('.ph').forEach((btn,bIdx)=>{
       btn.classList.toggle('active-thumb',bIdx===curIdx);
     });
   };
+  FullResLoader.loadInto(mainImg,loaderEl,albumItems[curIdx],albumItems[curIdx].title||e.title);
 
   albumItems.forEach((item,idx)=>{
     const w=document.createElement('div');
@@ -2517,7 +2950,7 @@ function openEventAlbumModal(eventId,initialTarget=0){
     b.innerHTML=`
       <div class="ph-thumb ${item.isCover?'cover-thumb':''}">
         ${item.isCover?'':`<span class="ph-badge">${esc(badgeLbl)}</span>`}
-        <img loading="lazy" decoding="async" alt="${esc(item.title||e.title)}" src="${esc(item.thumb||item.src)}">
+        <img loading="lazy" decoding="async" alt="${esc(item.title||e.title)}">
       </div>
       <div class="ph-info">
         ${item.isCover?`<span class="ph-badge cover-badge">${esc(badgeLbl)}</span>`:''}
@@ -2528,6 +2961,8 @@ function openEventAlbumModal(eventId,initialTarget=0){
         </div>
       </div>
     `;
+    const thImg=b.querySelector('img');
+    if(thImg)attachThumbnailToImg(thImg,item);
     b.onclick=()=>{
       setActive(idx);
       o.querySelector('#albumStage').scrollIntoView({behavior:'smooth',block:'nearest'});
@@ -2548,8 +2983,10 @@ function openPhoto(m){
     openEventAlbumModal(m.eventId,m.src||m.thumb);
     return;
   }
-  const o=modal('<p style="margin:0 0 6px;font-weight:700">'+esc(m.title||'')+'</p>'+(m.description?'<p style="margin:0 0 10px;font-size:13px;opacity:.85">'+esc(m.description)+'</p>':'')+'<img alt="'+esc(m.title||'Event photo')+'" id="lbImg" src="'+esc(m.src||m.thumb)+'">','lb');
-  if(m.remote&&db)db.ref('cf/mediaFull/'+m.id).once('value').then(s=>{if(s.val()&&$('#lbImg'))$('#lbImg').src=s.val()});
+  const o=modal('<p style="margin:0 0 6px;font-weight:700">'+esc(m.title||'')+'</p>'+(m.description?'<p style="margin:0 0 10px;font-size:13px;opacity:.85">'+esc(m.description)+'</p>':'')+'<div style="position:relative"><div class="lb-loader hidden" id="lbLoader">Loading full resolution...</div><img alt="'+esc(m.title||'Event photo')+'" id="lbImg"></div>','lb');
+  const lbImg=o.querySelector('#lbImg'),lbLoader=o.querySelector('#lbLoader');
+  attachThumbnailToImg(lbImg,m);
+  FullResLoader.loadInto(lbImg,lbLoader,m,m.title||'Event photo');
 }
 
 function openVideo(m){
@@ -2710,15 +3147,29 @@ async function deleteStorageFile(item){
    async decode (createImageBitmap) → Canvas JPEG (≤850px, q=0.68) → direct Realtime Database save (cf/media + cf/mediaFull)
    → hide that event's built-in photos (cf/deletedPhotos) once ≥1 new photo is saved. */
 const PHOTO_CFG={
-  maxDim:850,quality:0.68,            // fast, compact JPEG output (~50–95 KB typical)
-  thumbDim:400,thumbQuality:0.65,     // lightweight preview kept in cf/media
+  maxDim:960,quality:0.72,            // full-res display JPEG (~65–95 KB typical)
+  thumbDim:420,thumbQuality:0.65,     // lightweight preview JPEG (~18–28 KB typical)
   targetMaxBytes:95*1024,             // target upper size for fast RTDB sync
-  retryAboveBytes:120*1024,           // light step-down only if clearly above target
+  retryAboveBytes:115*1024,           // light step-down only if clearly above target
   dbTimeoutMs:20000,                  // Realtime Database write guard
-  dbMaxBytes:900*1024,                // maximum compressed JPEG allowed into RTDB
+  dbMaxBytes:900*1024,                // maximum compressed image allowed into RTDB
   maxPixels:120e6,                    // browser memory protection
   concurrency:2                       // controlled parallel workers without memory spikes
 };
+function hasAlphaTransparency(img){
+  try{
+    const c=document.createElement('canvas');
+    c.width=48;c.height=48;
+    const ctx=c.getContext('2d',{willReadFrequently:true});
+    if(!ctx)return false;
+    ctx.clearRect(0,0,48,48);
+    ctx.drawImage(img,0,0,48,48);
+    const data=ctx.getImageData(0,0,48,48).data;
+    c.width=c.height=0;
+    for(let i=3;i<data.length;i+=4){if(data[i]<250)return true;}
+  }catch(_){}
+  return false;
+}
 const fmtBytes=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB';
 
 async function decodeImageFile(file){
@@ -2757,42 +3208,54 @@ function releaseImage(img){
   try{if(img._objUrl){URL.revokeObjectURL(img._objUrl);img._objUrl=''}}catch(_){}
   try{img.onload=img.onerror=null}catch(_){}
 }
-function drawJpegCanvas(img,maxDim){
+function drawJpegCanvas(img,maxDim,preserveAlpha=false){
   const ow=img.naturalWidth||img.width,oh=img.naturalHeight||img.height;
   const s=Math.min(1,maxDim/Math.max(ow,oh));
   const w=Math.max(1,Math.round(ow*s)),h=Math.max(1,Math.round(oh*s));
   const c=document.createElement('canvas');
   c.width=w;c.height=h;
-  const ctx=c.getContext('2d',{alpha:false});
+  const ctx=c.getContext('2d',{alpha:!!preserveAlpha});
   if(!ctx)throw new UserError('Your browser could not create an image canvas (low memory?).');
   ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
-  ctx.fillStyle='#ffffff';ctx.fillRect(0,0,w,h);
+  if(preserveAlpha){ctx.clearRect(0,0,w,h);}else{ctx.fillStyle='#ffffff';ctx.fillRect(0,0,w,h);}
   ctx.drawImage(img,0,0,w,h);
   return {c,w,h};
 }
-function canvasToJpegBlob(c,quality){
+function canvasToJpegBlob(c,quality,mime='image/jpeg'){
   return new Promise((resolve,reject)=>{
     try{
-      c.toBlob(b=>b?resolve(b):reject(new UserError('The browser could not encode the image as JPEG.')),'image/jpeg',quality);
-    }catch(e){reject(new UserError('The browser could not encode the image as JPEG.'))}
+      c.toBlob(b=>b?resolve(b):reject(new UserError('The browser could not encode the image.')),mime,quality);
+    }catch(e){reject(new UserError('The browser could not encode the image.'))}
   });
 }
 async function compressPhoto(file){
   const img=await decodeImageFile(file);
   try{
     const ow=img.naturalWidth||img.width,oh=img.naturalHeight||img.height;
-    const attempts=[[PHOTO_CFG.maxDim,PHOTO_CFG.quality],[PHOTO_CFG.maxDim,0.58],[740,0.55]];
+    const isTransparent=/png|webp/i.test(file.type||file.name||'')&&hasAlphaTransparency(img);
+    const outMime=isTransparent?'image/webp':'image/jpeg';
+    const attempts=isTransparent
+      ? [[PHOTO_CFG.maxDim,0.78],[PHOTO_CFG.maxDim,0.65],[760,0.58]]
+      : [[PHOTO_CFG.maxDim,PHOTO_CFG.quality],[PHOTO_CFG.maxDim,0.62],[820,0.58]];
     let best=null;
     for(const [dim,q] of attempts){
-      const {c,w,h}=drawJpegCanvas(img,dim);
+      const {c,w,h}=drawJpegCanvas(img,dim,isTransparent);
       let blob;
-      try{blob=await canvasToJpegBlob(c,q)}finally{c.width=c.height=0}
+      try{
+        blob=await canvasToJpegBlob(c,q,outMime);
+        if(isTransparent&&blob.type!=='image/webp'&&blob.size>PHOTO_CFG.dbMaxBytes){
+          blob=await canvasToJpegBlob(c,q,'image/png');
+        }
+      }finally{c.width=c.height=0}
       best={blob,width:w,height:h,quality:q};
       if(blob.size<=PHOTO_CFG.retryAboveBytes)break;
     }
-    const t=drawJpegCanvas(img,PHOTO_CFG.thumbDim);
+    const t=drawJpegCanvas(img,PHOTO_CFG.thumbDim,isTransparent);
     let thumb='';
-    try{thumb=t.c.toDataURL('image/jpeg',PHOTO_CFG.thumbQuality)}finally{t.c.width=t.c.height=0}
+    try{
+      thumb=t.c.toDataURL(outMime,PHOTO_CFG.thumbQuality);
+      if(isTransparent&&!thumb.startsWith('data:image/webp'))thumb=t.c.toDataURL('image/png');
+    }finally{t.c.width=t.c.height=0}
     const dataUrl=await blobToDataUrl(best.blob);
     return {bytes:best.blob.size,width:best.width,height:best.height,quality:best.quality,
             origWidth:ow,origHeight:oh,origBytes:file.size,thumb,dataUrl};
@@ -3401,7 +3864,7 @@ function openAdmin(tab='dashboard',evId){
           </div>
         </div>
         <div id="mFileBox">
-          <label for="mFiles">SELECT IMAGE(S) (JPG, PNG, WEBP • AUTO-COMPRESSED TO JPEG ≤850PX)</label>
+          <label for="mFiles">SELECT IMAGE(S) (JPG, PNG, WEBP • DUAL-RES ≤420PX THUMB &amp; ≤960PX FULL)</label>
           <input id="mFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple style="padding:10px" aria-label="Select images (JPG, PNG, WEBP)">
         </div>
         <div id="mVideoBox" class="hidden">
@@ -3415,6 +3878,15 @@ function openAdmin(tab='dashboard',evId){
         <div id="mProgWrap" class="prog-wrap hidden"><div id="mProgBar" class="prog-bar"></div></div>
         <p id="mMsg" role="status" style="font-size:14px;margin-top:10px;font-weight:600"></p>
         <button class="btn green" id="mGo" type="button" style="width:100%;margin-top:12px;padding:12px">Upload to Website</button>
+
+        <div class="url-upload-box" id="mDirectUrlBox">
+          <label for="mDirectUrls" class="ed-upload-label" style="margin-top:0">OR PASTE DIRECT IMAGE URL(S) (ONE PER LINE)</label>
+          <p class="fine" style="margin:0 0 8px">Paste one <code>http://</code> or <code>https://</code> image link per line (or comma-separated). Saved directly to Firebase without Base64 re-encoding.</p>
+          <textarea id="mDirectUrls" placeholder="https://raw.githubusercontent.com/.../photo.jpg&#10;https://i.ibb.co/.../image.jpg&#10;https://drive.google.com/file/d/FILE_ID/view"></textarea>
+          <div id="mDirectUrlProgWrap" class="prog-wrap hidden" style="margin-top:8px"><div id="mDirectUrlProgBar" class="prog-bar"></div></div>
+          <p id="mDirectUrlStatus" role="status" class="fine" style="margin:8px 0 0;font-weight:600"></p>
+          <button type="button" class="btn sm" id="mDirectUrlBtn" style="margin-top:10px;width:100%">🔗 Add Photo Link(s)</button>
+        </div>
       </div>
 
       <div class="adm-sec">
@@ -3541,7 +4013,7 @@ function openAdmin(tab='dashboard',evId){
         const evName=evById(m.eventId)?.title||m.eventId||'General';
         const preview=m.type==='video'
           ? `<div style="height:120px;background:var(--navy);color:#fff;display:grid;place-items:center;font-weight:700;padding:10px;text-align:center">▶ Video<br><small style="font-weight:400;opacity:.8">${esc((m.title||'').slice(0,35))}</small></div>`
-          : `<img loading="lazy" decoding="async" alt="${esc(m.title||'')}" src="${esc(m.thumb||m.src)}">`;
+          : `<img loading="lazy" decoding="async" alt="${esc(m.title||'')}" data-adm-med-id="${esc(m.id)}">`;
         return `<div class="adm-media-card">
           ${preview}
           <div class="am-body">
@@ -3558,6 +4030,10 @@ function openAdmin(tab='dashboard',evId){
         </div>`;
       }).join('')+'</div>';
 
+      box.querySelectorAll('img[data-adm-med-id]').forEach(im=>{
+        const it=items.find(x=>x.id===im.dataset.admMedId);
+        if(it)attachThumbnailToImg(im,it);
+      });
       box.querySelectorAll('[data-del-med]').forEach(b=>{
         b.onclick=async()=>{
           await delMedia(b.dataset.delMed);
@@ -3623,6 +4099,37 @@ function openAdmin(tab='dashboard',evId){
           inp.click();
         };
       });
+    };
+
+    const mDirectBtn=$('#mDirectUrlBtn'),mDirectInp=$('#mDirectUrls'),mDirectStatus=$('#mDirectUrlStatus'),mDirectProgWrap=$('#mDirectUrlProgWrap'),mDirectProgBar=$('#mDirectUrlProgBar');
+    if(mDirectBtn)mDirectBtn.onclick=async()=>{
+      if(mDirectBtn.disabled)return;
+      const eventId=$('#mEv').value,type=($('#mType').value==='poster'?'poster':'photo'),title=$('#mTitle').value.trim().slice(0,120),description=$('#mDesc').value.trim().slice(0,300);
+      mDirectBtn.disabled=true;
+      const ulog=photoLog(mDirectStatus);ulog.clear();
+      mDirectStatus.style.color='var(--ink)';mDirectStatus.textContent='Validating image URL(s)...';
+      mDirectProgWrap.classList.remove('hidden');mDirectProgBar.style.width='10%';
+      try{
+        needAdmin();
+        const sum=await saveDirectImageUrls({
+          urlsText:mDirectInp.value,eventId,type,title,description,
+          replaceBuiltin:type==='photo',
+          ui:{
+            status:(t,p)=>{mDirectStatus.textContent=t;mDirectProgBar.style.width=Math.max(10,Math.min(100,p))+'%';},
+            result:r=>ulog.upsert(r.id,r.text,r.level),
+            afterEach:()=>{try{renderAdminMediaList();}catch(_){}}
+          }
+        });
+        mDirectProgBar.style.width=sum.succeeded?'100%':'0%';
+        mDirectStatus.style.color=sum.failed.length?(sum.succeeded?'#b45309':'var(--danger)'):'var(--green)';
+        mDirectStatus.textContent=`Added ${sum.succeeded} of ${sum.total} image URL(s).`+(sum.failed.length?` ${sum.failed.length} failed.`:'');
+        if(sum.succeeded){mDirectInp.value='';toast(`${sum.succeeded} image URL(s) added!`);renderAdminMediaList();}
+      }catch(err){
+        mDirectStatus.style.color='var(--danger)';
+        mDirectStatus.textContent=fbMsg(err,'Could not add image URLs.');
+      }finally{
+        mDirectBtn.disabled=false;
+      }
     };
 
     filterSel.onchange=renderAdminMediaList;
@@ -3891,11 +4398,19 @@ function openAdmin(tab='dashboard',evId){
           <p id="edPhotoStatus" role="status" class="fine" style="margin:0 0 8px;font-weight:600"></p>
           <div id="edExistingPhotos" class="ed-photo-grid"></div>
           <div class="ed-upload-box">
-            <label for="edPhotoFiles" class="ed-upload-label">SELECT IMAGE(S) (JPG, PNG, WEBP • AUTO-COMPRESSED TO JPEG ≤850PX)</label>
+            <label for="edPhotoFiles" class="ed-upload-label">SELECT IMAGE(S) (JPG, PNG, WEBP • DUAL-RES ≤420PX THUMB &amp; ≤960PX FULL)</label>
             <input id="edPhotoFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple style="padding:9px" aria-label="Select event photographs">
             <div id="edPhotoProgWrap" class="prog-wrap hidden" style="margin-top:8px"><div id="edPhotoProgBar" class="prog-bar"></div></div>
             <div id="edPhotoProgMeta" class="ed-prog-meta hidden"><span id="edPhotoProgText">Preparing images...</span><span id="edPhotoProgPct">0%</span></div>
             <button class="btn sm green" id="edUploadPhotosBtn" type="button" style="margin-top:10px;width:100%;padding:10px">📤 Upload &amp; Append Selected Photograph(s)</button>
+          </div>
+          <div class="url-upload-box" id="edDirectUrlBox">
+            <label for="edDirectUrls" class="ed-upload-label" style="margin-top:0">OR PASTE DIRECT IMAGE URL(S) (ONE PER LINE)</label>
+            <p class="fine" style="margin:0 0 8px">Paste one <code>http://</code> or <code>https://</code> image link per line (or comma-separated). Saved directly to Firebase without Base64 re-encoding.</p>
+            <textarea id="edDirectUrls" placeholder="https://raw.githubusercontent.com/.../photo.jpg&#10;https://i.ibb.co/.../image.jpg&#10;https://drive.google.com/file/d/FILE_ID/view"></textarea>
+            <div id="edDirectUrlProgWrap" class="prog-wrap hidden" style="margin-top:8px"><div id="edDirectUrlProgBar" class="prog-bar"></div></div>
+            <p id="edDirectUrlStatus" role="status" class="fine" style="margin:8px 0 0;font-weight:600"></p>
+            <button type="button" class="btn sm" id="edDirectUrlBtn" style="margin-top:10px;width:100%">🔗 Add Photo Link(s)</button>
           </div>
         </div>
 
@@ -3934,12 +4449,14 @@ function openAdmin(tab='dashboard',evId){
           card.className='ed-photo-card';
           card.innerHTML=`
             <div class="ed-photo-thumb">
-              <img loading="lazy" decoding="async" alt="${esc(item.title||'Event photograph')}" src="${esc(item.thumb||item.src)}">
+              <img loading="lazy" decoding="async" alt="${esc(item.title||'Event photograph')}">
               ${item.remote?'':`<span class="ed-photo-tag">Built-in</span>`}
               <button type="button" class="ed-photo-del" title="Delete photograph" aria-label="Delete photograph">×</button>
             </div>
             <div class="ed-photo-cap" title="${esc(item.title||'')}">${esc(item.title||'Event Photo')}</div>
           `;
+          const edImg=card.querySelector('.ed-photo-thumb img');
+          if(edImg)attachThumbnailToImg(edImg,item);
           const delBtn=card.querySelector('.ed-photo-del');
           delBtn.onclick=async()=>{
             if(delBtn.disabled)return;
@@ -4046,6 +4563,39 @@ function openAdmin(tab='dashboard',evId){
           edUploadBusy=false;
           edUploadBtn.disabled=false;
           edPhotoInput.disabled=false;
+        }
+      };
+
+      const edDirBtn=$('#edDirectUrlBtn'),edDirInp=$('#edDirectUrls'),edDirStatus=$('#edDirectUrlStatus'),edDirProgWrap=$('#edDirectUrlProgWrap'),edDirProgBar=$('#edDirectUrlProgBar');
+      if(edDirBtn)edDirBtn.onclick=async()=>{
+        if(edDirBtn.disabled)return;
+        edDirBtn.disabled=true;
+        const ulog=photoLog(edDirStatus);ulog.clear();
+        edDirStatus.style.color='var(--ink)';edDirStatus.textContent='Validating image URL(s)...';
+        edDirProgWrap.classList.remove('hidden');edDirProgBar.style.width='10%';
+        try{
+          needAdmin();
+          const baseCount=media.filter(m=>m.eventId===e.id&&m.type==='photo').length;
+          const sum=await saveDirectImageUrls({
+            urlsText:edDirInp.value,eventId:e.id,type:'photo',
+            title:`${e.title} (Photo ${baseCount+1})`,description:'',
+            replaceBuiltin:true,
+            ui:{
+              status:(t,p)=>{edDirStatus.textContent=t;edDirProgBar.style.width=Math.max(10,Math.min(100,p))+'%';},
+              result:r=>ulog.upsert(r.id,r.text,r.level),
+              afterEach:()=>renderEditPhotos()
+            }
+          });
+          renderEditPhotos();
+          edDirProgBar.style.width=sum.succeeded?'100%':'0%';
+          edDirStatus.style.color=sum.failed.length?(sum.succeeded?'#b45309':'var(--danger)'):'var(--green)';
+          edDirStatus.textContent=`Added ${sum.succeeded} of ${sum.total} image URL(s).`+(sum.failed.length?` ${sum.failed.length} failed.`:'');
+          if(sum.succeeded){edDirInp.value='';toast(`${sum.succeeded} image URL(s) added to event!`);}
+        }catch(err){
+          edDirStatus.style.color='var(--danger)';
+          edDirStatus.textContent=fbMsg(err,'Could not add image URLs.');
+        }finally{
+          edDirBtn.disabled=false;
         }
       };
 
@@ -4880,9 +5430,23 @@ function initInteractiveControls(){
   handleAdminHash(false);
 }
 
+function scheduleDeferredFirebaseSync(){
+  const startSync=()=>{
+    if(typeof requestIdleCallback==='function'){
+      requestIdleCallback(()=>initFirebaseDataSync(),{timeout:1200});
+    }else{
+      initFirebaseDataSync();
+    }
+  };
+  if(document.readyState==='complete'){
+    setTimeout(startSync,400);
+  }else{
+    window.addEventListener('load',()=>setTimeout(startSync,400),{once:true});
+  }
+}
 function bootPortal(){
   initInteractiveControls();
-  requestAnimationFrame(()=>setTimeout(initFirebaseDataSync,0));
+  scheduleDeferredFirebaseSync();
 }
 if(document.readyState==='loading'){
   document.addEventListener('DOMContentLoaded',bootPortal,{once:true});
